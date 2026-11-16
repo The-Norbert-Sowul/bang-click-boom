@@ -1,0 +1,29 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# Next.js build output
+/.next/
+/out/
+/build
+next-env.d.ts
+
+# Local Env files
+.env*.local
+.env
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SQLite live database & backups (kept safe from git code rollbacks!)
+/data/bcb.db
+/data/bcb.db-wal
+/data/bcb.db-shm
+/backups/*.db
