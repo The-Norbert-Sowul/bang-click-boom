@@ -63,6 +63,8 @@ export async function POST(req: NextRequest) {
       const newCompleted = completed !== undefined ? (completed ? 1 : 0) : existing.completed;
       const newAssignee = assignee !== undefined ? assignee : existing.assignee;
       const newDueDate = due_date !== undefined ? due_date : existing.due_date;
+      const newCompletedAt =
+        completed !== undefined ? (newCompleted === 1 ? now : null) : existing.completed_at;
 
       // Automatically move task to "Completed"/"Done" section when marked complete,
       // or back to the first section ("To Do") when reopened if no explicit section_id was passed
@@ -85,9 +87,9 @@ export async function POST(req: NextRequest) {
 
       db.prepare(`
         UPDATE tasks
-        SET title = ?, description = ?, completed = ?, assignee = ?, due_date = ?, section_id = ?, updated_at = ?, updated_by = ?
+        SET title = ?, description = ?, completed = ?, assignee = ?, due_date = ?, section_id = ?, updated_at = ?, completed_at = ?, updated_by = ?
         WHERE id = ?
-      `).run(newTitle, newDesc, newCompleted, newAssignee, newDueDate, newSectionId, now, actor, id);
+      `).run(newTitle, newDesc, newCompleted, newAssignee, newDueDate, newSectionId, now, newCompletedAt, actor, id);
 
       if (field_values && typeof field_values === "object") {
         const upsertVal = db.prepare(`

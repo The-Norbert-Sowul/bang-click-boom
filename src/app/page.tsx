@@ -18,10 +18,10 @@ import {
   Eye,
   EyeOff,
   X,
-  CheckSquare,
   Rocket,
   Activity,
 } from "lucide-react";
+import BurnupChart from "@/components/BurnupChart";
 
 interface Portfolio {
   id: string;
@@ -67,6 +67,7 @@ interface Task {
   due_date: string | null;
   created_at: string;
   updated_at: string;
+  completed_at?: string | null;
   updated_by: "You" | "Gemini";
   field_values: Record<string, string | number | null>;
 }
@@ -90,7 +91,7 @@ interface WorkspaceData {
 
 export default function BangClickBoomApp() {
   const [data, setData] = useState<WorkspaceData | null>(null);
-  const [activeView, setActiveView] = useState<"dashboard" | "my_tasks" | "portfolio" | string>("proj-bcb");
+  const [activeView, setActiveView] = useState<"dashboard" | "portfolio" | string>("proj-bcb");
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [showCustomizeModal, setShowCustomizeModal] = useState(false);
@@ -289,18 +290,6 @@ export default function BangClickBoomApp() {
             >
               <LayoutDashboard className="w-4 h-4" />
               Analytics Dashboard
-            </button>
-
-            <button
-              onClick={() => setActiveView("my_tasks")}
-              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition ${
-                activeView === "my_tasks"
-                  ? "bg-bcb-cerulean text-white"
-                  : "text-stone-300 hover:bg-bcb-surface"
-              }`}
-            >
-              <CheckSquare className="w-4 h-4" />
-              All Tasks (You & Gemini)
             </button>
 
             <button
@@ -575,6 +564,9 @@ export default function BangClickBoomApp() {
               </div>
             </div>
 
+            {/* Task Completion Burnup Chart */}
+            <BurnupChart tasks={data.tasks} title="Task Completion Burnup" />
+
             {/* Recent Co-Working Activity Feed */}
             <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-6">
               <div className="flex items-center gap-2 mb-4">
@@ -695,78 +687,7 @@ export default function BangClickBoomApp() {
           </div>
         )}
 
-        {/* VIEW 3: ALL TASKS VIEW */}
-        {activeView === "my_tasks" && (
-          <div className="flex-1 overflow-y-auto p-8 space-y-6">
-            <div className="border-b border-bcb-border pb-5">
-              <h2 className="text-2xl font-bold text-white">All Workspace Tasks</h2>
-              <p className="text-sm text-stone-400 mt-1">
-                Every task across all projects assigned to You and Gemini.
-              </p>
-            </div>
-            <div className="bg-bcb-coffee border border-bcb-border rounded-xl overflow-hidden">
-              <table className="w-full text-left border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-bcb-border text-xs uppercase text-stone-400 bg-bcb-canvas/40">
-                    <th className="py-3 px-4">Task</th>
-                    <th className="py-3 px-4">Project</th>
-                    <th className="py-3 px-4">Assigned To</th>
-                    <th className="py-3 px-4">Due Date</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-bcb-border">
-                  {data.tasks.map((t) => {
-                    const proj = data.projects.find((p) => p.id === t.project_id);
-                    return (
-                      <tr
-                        key={t.id}
-                        onClick={() => setSelectedTask(t)}
-                        className="hover:bg-bcb-surface cursor-pointer transition"
-                      >
-                        <td className="py-3 px-4 flex items-center gap-3">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              apiAction({
-                                action: "update_task",
-                                id: t.id,
-                                completed: t.completed === 0,
-                              });
-                            }}
-                          >
-                            {t.completed ? (
-                              <CheckCircle2 className="w-5 h-5 text-bcb-tea" />
-                            ) : (
-                              <Circle className="w-5 h-5 text-stone-400 hover:text-bcb-cerulean-light" />
-                            )}
-                          </button>
-                          <span className={t.completed ? "line-through text-stone-500" : "text-white font-medium"}>
-                            {t.title}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-xs text-bcb-tea">{proj?.name}</td>
-                        <td className="py-3 px-4">
-                          <span
-                            className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                              t.assignee === "Gemini"
-                                ? "bg-bcb-cerulean text-white"
-                                : "bg-bcb-surface text-bcb-tea border border-bcb-border"
-                            }`}
-                          >
-                            {t.assignee}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-xs text-stone-300">{t.due_date || "—"}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* VIEW 4: PROJECT LIST VIEW WITH DYNAMIC CUSTOM FIELDS */}
+        {/* VIEW 3: PROJECT LIST VIEW WITH DYNAMIC CUSTOM FIELDS */}
         {activeProject && (
           <div className="flex-1 flex flex-col overflow-hidden">
             {/* Project Header */}
