@@ -756,7 +756,13 @@ export default function BangClickBoomApp() {
             </div>
 
             {/* Task Completion Burnup Chart */}
-            <BurnupChart tasks={activeTasks} title="Task Completion Burnup" />
+            <BurnupChart
+              tasks={data.tasks.map((t) => ({
+                ...t,
+                is_archived: !activeProjectIds.has(t.project_id),
+              }))}
+              title="Task Completion Burnup"
+            />
 
             {/* Recent Co-Working Activity Feed */}
             <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-6">

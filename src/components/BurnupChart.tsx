@@ -9,6 +9,7 @@ export interface BurnupTaskInput {
   created_at: string;
   updated_at: string;
   completed_at?: string | null;
+  is_archived?: boolean | number;
 }
 
 export type BurnupDateRange = "1w" | "2w" | "1m" | "3m" | "all" | "custom";
@@ -17,7 +18,9 @@ export interface BurnupPoint {
   dateKey: string; // YYYY-MM-DD
   label: string;   // MM/DD/YY
   total: number;
+  activeTotal: number;
   completed: number;
+  activeCompleted: number;
 }
 
 export interface BurnupResult {
@@ -142,16 +145,22 @@ export function buildBurnupSeries(
 
   const points: BurnupPoint[] = sampledDays.map((dateKey) => {
     let total = 0;
+    let activeTotal = 0;
     let completed = 0;
+    let activeCompleted = 0;
 
     for (const t of tasks) {
+      const isActive = !t.is_archived;
       const createdKey = t.created_at.slice(0, 10);
       if (createdKey <= dateKey) {
         total += 1;
+        if (isActive) activeTotal += 1;
+
         if (t.completed === 1) {
           const compKey = (t.completed_at || t.updated_at).slice(0, 10);
           if (compKey <= dateKey) {
             completed += 1;
+            if (isActive) activeCompleted += 1;
           }
         }
       }
@@ -161,7 +170,9 @@ export function buildBurnupSeries(
       dateKey,
       label: formatAxisDate(dateKey),
       total,
+      activeTotal,
       completed,
+      activeCompleted,
     };
   });
 
@@ -228,6 +239,15 @@ export default function BurnupChart({
       ? `${totalLinePath} L ${getX(points.length - 1)} ${baselineY} L ${getX(0)} ${baselineY} Z`
       : "";
 
+  const activeTotalLinePath = points
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${getX(i)} ${getY(p.activeTotal)}`)
+    .join(" ");
+
+  const activeTotalAreaPath =
+    points.length > 0
+      ? `${activeTotalLinePath} L ${getX(points.length - 1)} ${baselineY} L ${getX(0)} ${baselineY} Z`
+      : "";
+
   const completedLinePath = points
     .map((p, i) => `${i === 0 ? "M" : "L"} ${getX(i)} ${getY(p.completed)}`)
     .join(" ");
@@ -235,6 +255,15 @@ export default function BurnupChart({
   const completedAreaPath =
     points.length > 0
       ? `${completedLinePath} L ${getX(points.length - 1)} ${baselineY} L ${getX(0)} ${baselineY} Z`
+      : "";
+
+  const activeCompletedLinePath = points
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${getX(i)} ${getY(p.activeCompleted)}`)
+    .join(" ");
+
+  const activeCompletedAreaPath =
+    points.length > 0
+      ? `${activeCompletedLinePath} L ${getX(points.length - 1)} ${baselineY} L ${getX(0)} ${baselineY} Z`
       : "";
 
   const yTicks = [0, Math.round(yMax / 2), yMax];
@@ -339,35 +368,74 @@ export default function BurnupChart({
             );
           })}
 
-          {/* Total Tasks Area (Cerulean) */}
+          {/* Total Tasks Area (All: Active + Archived) */}
           {totalAreaPath && (
-            <path d={totalAreaPath} fill="#477998" fillOpacity={0.3} />
+            <path d={totalAreaPath} fill="#477998" fillOpacity={0.2} />
           )}
           {totalLinePath && (
             <path d={totalLinePath} fill="none" stroke="#5C92B4" strokeWidth={2.5} />
           )}
 
-          {/* Completed Tasks Area (Tea Green) */}
+          {/* Active Total Tasks Area (Active Projects Only) */}
+          {activeTotalAreaPath && (
+            <path d={activeTotalAreaPath} fill="#8AB8D4" fillOpacity={0.14} />
+          )}
+          {activeTotalLinePath && (
+            <path
+              d={activeTotalLinePath}
+              fill="none"
+              stroke="#8AB8D4"
+              strokeWidth={2}
+              strokeDasharray="5 4"
+            />
+          )}
+
+          {/* Completed Tasks Area (All: Active + Archived) */}
           {completedAreaPath && (
-            <path d={completedAreaPath} fill="#C4D6B0" fillOpacity={0.85} />
+            <path d={completedAreaPath} fill="#9AB380" fillOpacity={0.35} />
           )}
           {completedLinePath && (
-            <path d={completedLinePath} fill="none" stroke="#C4D6B0" strokeWidth={2.5} />
+            <path
+              d={completedLinePath}
+              fill="none"
+              stroke="#9AB380"
+              strokeWidth={2}
+              strokeDasharray="5 4"
+            />
+          )}
+
+          {/* Active Completed Tasks Area (Active Projects Only) */}
+          {activeCompletedAreaPath && (
+            <path d={activeCompletedAreaPath} fill="#C4D6B0" fillOpacity={0.8} />
+          )}
+          {activeCompletedLinePath && (
+            <path d={activeCompletedLinePath} fill="none" stroke="#C4D6B0" strokeWidth={2.5} />
           )}
 
           {/* Data Labels & Tilted X-Axis Dates */}
           {points.map((p, i) => {
             const x = getX(i);
             const yTotal = getY(p.total);
+            const yActiveTotal = getY(p.activeTotal);
             const yCompleted = getY(p.completed);
+            const yActiveCompleted = getY(p.activeCompleted);
             const bothZero = p.total === 0 && p.completed === 0;
 
             // Total label always above the Total line
             const totalLabelY = Math.max(14, yTotal - 10);
+            // Active Total label (only shown when different from Total)
+            const activeTotalLabelY =
+              Math.abs(yActiveTotal - 10 - totalLabelY) < 16
+                ? Math.min(baselineY - 6, yActiveTotal + 16)
+                : Math.max(14, yActiveTotal - 10);
 
             // Completed label always below the Completed line (with padding above baseline)
-            const completedBelowY = yCompleted + 16;
-            const completedLabelY = Math.min(baselineY - 6, completedBelowY);
+            const completedLabelY = Math.min(baselineY - 6, yCompleted + 16);
+            // Active Completed label (only shown when different from Completed)
+            const activeCompletedLabelY =
+              Math.abs(yActiveCompleted + 16 - completedLabelY) < 16
+                ? Math.max(14, yActiveCompleted - 8)
+                : Math.min(baselineY - 6, yActiveCompleted + 16);
 
             const renderPill = (cx: number, cy: number, val: number) => {
               const digits = String(val).length;
@@ -416,6 +484,22 @@ export default function BurnupChart({
                       </text>
                     </g>
 
+                    {/* Active Total number (when archived tasks exist) */}
+                    {p.activeTotal !== p.total && (
+                      <g>
+                        {renderPill(x, activeTotalLabelY, p.activeTotal)}
+                        <text
+                          x={x}
+                          y={activeTotalLabelY}
+                          textAnchor="middle"
+                          fill="#8AB8D4"
+                          className="text-[11px] font-bold"
+                        >
+                          {p.activeTotal}
+                        </text>
+                      </g>
+                    )}
+
                     {/* Completed number below Completed line */}
                     <g>
                       {renderPill(x, completedLabelY, p.completed)}
@@ -423,12 +507,28 @@ export default function BurnupChart({
                         x={x}
                         y={completedLabelY}
                         textAnchor="middle"
-                        fill="#C4D6B0"
+                        fill="#9AB380"
                         className="text-[11px] font-bold"
                       >
                         {p.completed}
                       </text>
                     </g>
+
+                    {/* Active Completed number (when archived completed tasks exist) */}
+                    {p.activeCompleted !== p.completed && (
+                      <g>
+                        {renderPill(x, activeCompletedLabelY, p.activeCompleted)}
+                        <text
+                          x={x}
+                          y={activeCompletedLabelY}
+                          textAnchor="middle"
+                          fill="#C4D6B0"
+                          className="text-[11px] font-bold"
+                        >
+                          {p.activeCompleted}
+                        </text>
+                      </g>
+                    )}
                   </>
                 )}
 
@@ -449,14 +549,22 @@ export default function BurnupChart({
       </div>
 
       {/* Bottom-Right Legend */}
-      <div className="flex items-center justify-end gap-5 pt-1 text-xs font-medium text-stone-300">
+      <div className="flex flex-wrap items-center justify-end gap-5 pt-1 text-xs font-medium text-stone-300">
         <div className="flex items-center gap-2">
           <span className="w-3.5 h-3.5 rounded-sm bg-bcb-cerulean border border-bcb-cerulean-light inline-block" />
-          <span>Total</span>
+          <span>Total (All)</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="w-3.5 h-0.5 border-t-2 border-dashed border-[#8AB8D4] inline-block" />
+          <span>Active Total</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="w-3.5 h-3.5 rounded-sm bg-bcb-tea-dark/70 border border-dashed border-bcb-tea-dark inline-block" />
+          <span>Completed (All)</span>
         </div>
         <div className="flex items-center gap-2">
           <span className="w-3.5 h-3.5 rounded-sm bg-bcb-tea inline-block" />
-          <span>Completed</span>
+          <span>Active Completed</span>
         </div>
       </div>
     </div>
