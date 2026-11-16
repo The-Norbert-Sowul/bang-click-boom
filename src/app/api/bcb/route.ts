@@ -204,6 +204,41 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(getFullWorkspaceData());
     }
 
+    if (body.action === "archive_project") {
+      const { project_id, is_archived = true } = body;
+      const existing = db.prepare("SELECT name FROM projects WHERE id = ?").get(project_id) as { name: string } | undefined;
+      if (!existing) {
+        return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      }
+      const archivedVal = is_archived ? 1 : 0;
+      db.prepare("UPDATE projects SET is_archived = ? WHERE id = ?").run(archivedVal, project_id);
+      db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+        crypto.randomUUID(),
+        actor,
+        archivedVal ? "Archived project" : "Restored project from archive",
+        existing.name,
+        now
+      );
+      return NextResponse.json(getFullWorkspaceData());
+    }
+
+    if (body.action === "delete_project") {
+      const { project_id } = body;
+      const existing = db.prepare("SELECT name FROM projects WHERE id = ?").get(project_id) as { name: string } | undefined;
+      if (!existing) {
+        return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      }
+      db.prepare("DELETE FROM projects WHERE id = ?").run(project_id);
+      db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+        crypto.randomUUID(),
+        actor,
+        "Deleted project",
+        existing.name,
+        now
+      );
+      return NextResponse.json(getFullWorkspaceData());
+    }
+
     if (body.action === "backup_db") {
       const backupFile = createSnapshotBackup();
       return NextResponse.json({ backupFile, ...getFullWorkspaceData() });

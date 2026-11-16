@@ -20,6 +20,9 @@ import {
   X,
   Rocket,
   Activity,
+  Menu,
+  Archive,
+  ArchiveRestore,
 } from "lucide-react";
 import BurnupChart from "@/components/BurnupChart";
 
@@ -37,6 +40,7 @@ interface Project {
   description: string;
   status: string;
   icon: string;
+  is_archived: number;
 }
 
 interface Section {
@@ -110,6 +114,12 @@ export default function BangClickBoomApp() {
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectDesc, setNewProjectDesc] = useState("");
 
+  // Project menu & Archive/Delete state
+  const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
+  const [showArchivedProjects, setShowArchivedProjects] = useState(true);
+  const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+
   // Backup toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -173,16 +183,21 @@ export default function BangClickBoomApp() {
     : [];
   const visibleProjectFields = projectFields.filter((f) => f.is_visible === 1);
 
-  // Analytics calculations
-  const totalTasks = data.tasks.length;
-  const completedTasks = data.tasks.filter((t) => t.completed === 1).length;
-  const geminiTasks = data.tasks.filter((t) => t.assignee === "Gemini").length;
-  const yourTasks = data.tasks.filter((t) => t.assignee === "You").length;
+  const activeProjects = data.projects.filter((p) => !p.is_archived);
+  const archivedProjects = data.projects.filter((p) => p.is_archived === 1);
+  const activeProjectIds = new Set(activeProjects.map((p) => p.id));
+  const activeTasks = data.tasks.filter((t) => activeProjectIds.has(t.project_id));
+
+  // Analytics calculations (scoped to active non-archived projects)
+  const totalTasks = activeTasks.length;
+  const completedTasks = activeTasks.filter((t) => t.completed === 1).length;
+  const geminiTasks = activeTasks.filter((t) => t.assignee === "Gemini").length;
+  const yourTasks = activeTasks.filter((t) => t.assignee === "You").length;
 
   let totalEstHours = 0;
   let totalActualHours = 0;
 
-  for (const t of data.tasks) {
+  for (const t of activeTasks) {
     const pFields = data.customFields.filter((f) => f.project_id === t.project_id);
     for (const f of pFields) {
       const val = Number(t.field_values[f.id] || 0);
@@ -320,30 +335,206 @@ export default function BangClickBoomApp() {
               </button>
             </div>
             <div className="space-y-1">
-              {data.projects.map((proj) => (
-                <button
-                  key={proj.id}
-                  onClick={() => setActiveView(proj.id)}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium transition ${
-                    activeView === proj.id
-                      ? "bg-bcb-cerulean text-white"
-                      : "text-stone-300 hover:bg-bcb-surface"
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5 truncate">
-                    {proj.icon === "Rocket" ? (
-                      <Rocket className="w-4 h-4 shrink-0 text-bcb-tea" />
-                    ) : (
-                      <FolderKanban className="w-4 h-4 shrink-0 text-bcb-cerulean-light" />
+              {activeProjects.map((proj) => {
+                const isMenuOpen = openProjectMenuId === proj.id;
+                const openTaskCount = data.tasks.filter((t) => t.project_id === proj.id && !t.completed).length;
+
+                return (
+                  <div key={proj.id} className="relative group">
+                    <div
+                      onClick={() => {
+                        setActiveView(proj.id);
+                        setOpenProjectMenuId(null);
+                      }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium transition cursor-pointer ${
+                        activeView === proj.id
+                          ? "bg-bcb-cerulean text-white"
+                          : "text-stone-300 hover:bg-bcb-surface"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 truncate">
+                        {proj.icon === "Rocket" ? (
+                          <Rocket className="w-4 h-4 shrink-0 text-bcb-tea" />
+                        ) : (
+                          <FolderKanban className="w-4 h-4 shrink-0 text-bcb-cerulean-light" />
+                        )}
+                        <span className="truncate">{proj.name}</span>
+                      </div>
+
+                      {/* Task Pill switches to Hamburger Menu on hover */}
+                      <div className="shrink-0 ml-2 flex items-center">
+                        <span
+                          className={`text-xs px-1.5 py-0.5 rounded bg-black/25 text-stone-300 ${
+                            isMenuOpen ? "hidden" : "group-hover:hidden"
+                          }`}
+                        >
+                          {openTaskCount}
+                        </span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenProjectMenuId(isMenuOpen ? null : proj.id);
+                          }}
+                          className={`p-1 rounded hover:bg-black/30 text-stone-200 ${
+                            isMenuOpen ? "inline-flex" : "hidden group-hover:inline-flex"
+                          }`}
+                          title="Project Options"
+                        >
+                          <Menu className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {isMenuOpen && (
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        className="absolute right-2 top-9 z-40 w-44 bg-bcb-canvas border border-bcb-border rounded-lg shadow-xl py-1 text-xs"
+                      >
+                        <button
+                          onClick={async () => {
+                            setOpenProjectMenuId(null);
+                            await apiAction({
+                              action: "archive_project",
+                              project_id: proj.id,
+                              is_archived: true,
+                            });
+                            if (activeView === proj.id) setActiveView("dashboard");
+                            triggerToast(`Archived "${proj.name}"`);
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-left text-stone-200 hover:bg-bcb-surface transition"
+                        >
+                          <Archive className="w-3.5 h-3.5 text-bcb-tea" />
+                          Archive Project
+                        </button>
+                        <button
+                          onClick={() => {
+                            setOpenProjectMenuId(null);
+                            setProjectToDelete(proj);
+                            setDeleteConfirmText("");
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-left text-red-400 hover:bg-red-950/50 transition"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Delete Project
+                        </button>
+                      </div>
                     )}
-                    <span className="truncate">{proj.name}</span>
                   </div>
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-black/25 text-stone-300">
-                    {data.tasks.filter((t) => t.project_id === proj.id && !t.completed).length}
-                  </span>
-                </button>
-              ))}
+                );
+              })}
             </div>
+          </div>
+
+          {/* Archived Projects Section */}
+          <div className="px-3 mt-5">
+            <button
+              onClick={() => setShowArchivedProjects(!showArchivedProjects)}
+              className="w-full flex items-center justify-between px-2 mb-2 text-xs font-semibold uppercase tracking-wider text-stone-400 hover:text-stone-200 transition"
+            >
+              <span className="flex items-center gap-1.5">
+                {showArchivedProjects ? (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5" />
+                )}
+                Archived Projects
+              </span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-bcb-surface text-stone-400">
+                {archivedProjects.length}
+              </span>
+            </button>
+
+            {showArchivedProjects && (
+              <div className="space-y-1">
+                {archivedProjects.length === 0 ? (
+                  <p className="px-3 py-1.5 text-[11px] text-stone-500 italic">
+                    No archived projects
+                  </p>
+                ) : (
+                  archivedProjects.map((proj) => {
+                    const isMenuOpen = openProjectMenuId === proj.id;
+                    const openTaskCount = data.tasks.filter((t) => t.project_id === proj.id && !t.completed).length;
+
+                    return (
+                      <div key={proj.id} className="relative group">
+                        <div
+                          onClick={() => {
+                            setActiveView(proj.id);
+                            setOpenProjectMenuId(null);
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium transition cursor-pointer ${
+                            activeView === proj.id
+                              ? "bg-bcb-cerulean text-white"
+                              : "text-stone-400 hover:bg-bcb-surface hover:text-stone-200"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 truncate">
+                            <Archive className="w-4 h-4 shrink-0 text-stone-500" />
+                            <span className="truncate">{proj.name}</span>
+                          </div>
+
+                          <div className="shrink-0 ml-2 flex items-center">
+                            <span
+                              className={`text-xs px-1.5 py-0.5 rounded bg-black/25 text-stone-400 ${
+                                isMenuOpen ? "hidden" : "group-hover:hidden"
+                              }`}
+                            >
+                              {openTaskCount}
+                            </span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setOpenProjectMenuId(isMenuOpen ? null : proj.id);
+                              }}
+                              className={`p-1 rounded hover:bg-black/30 text-stone-200 ${
+                                isMenuOpen ? "inline-flex" : "hidden group-hover:inline-flex"
+                              }`}
+                              title="Project Options"
+                            >
+                              <Menu className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {isMenuOpen && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="absolute right-2 top-9 z-40 w-44 bg-bcb-canvas border border-bcb-border rounded-lg shadow-xl py-1 text-xs"
+                          >
+                            <button
+                              onClick={async () => {
+                                setOpenProjectMenuId(null);
+                                await apiAction({
+                                  action: "archive_project",
+                                  project_id: proj.id,
+                                  is_archived: false,
+                                });
+                                triggerToast(`Restored "${proj.name}" to Projects`);
+                              }}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-left text-stone-200 hover:bg-bcb-surface transition"
+                            >
+                              <ArchiveRestore className="w-3.5 h-3.5 text-bcb-tea" />
+                              Restore Project
+                            </button>
+                            <button
+                              onClick={() => {
+                                setOpenProjectMenuId(null);
+                                setProjectToDelete(proj);
+                                setDeleteConfirmText("");
+                              }}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-left text-red-400 hover:bg-red-950/50 transition"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              Delete Project
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -430,7 +621,7 @@ export default function BangClickBoomApp() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-bcb-border">
-                    {data.projects.map((proj) => {
+                    {activeProjects.map((proj) => {
                       const pTasks = data.tasks.filter((t) => t.project_id === proj.id);
                       const pComplete = pTasks.filter((t) => t.completed === 1).length;
                       const pIncomplete = pTasks.length - pComplete;
@@ -508,7 +699,7 @@ export default function BangClickBoomApp() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-bcb-border">
-                    {data.projects.map((proj) => {
+                    {activeProjects.map((proj) => {
                       const pTasks = data.tasks.filter((t) => t.project_id === proj.id);
                       const pFields = data.customFields.filter((f) => f.project_id === proj.id);
                       let projEst = 0;
@@ -565,7 +756,7 @@ export default function BangClickBoomApp() {
             </div>
 
             {/* Task Completion Burnup Chart */}
-            <BurnupChart tasks={data.tasks} title="Task Completion Burnup" />
+            <BurnupChart tasks={activeTasks} title="Task Completion Burnup" />
 
             {/* Recent Co-Working Activity Feed */}
             <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-6">
@@ -631,7 +822,7 @@ export default function BangClickBoomApp() {
                     <p className="text-xs text-stone-400 mt-0.5">{port.description}</p>
                   </div>
                   <span className="text-xs px-2.5 py-1 rounded-full bg-bcb-surface text-bcb-tea border border-bcb-border">
-                    {data.projects.filter((p) => p.portfolio_id === port.id).length} Projects
+                    {activeProjects.filter((p) => p.portfolio_id === port.id).length} Projects
                   </span>
                 </div>
 
@@ -645,7 +836,7 @@ export default function BangClickBoomApp() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-bcb-border">
-                    {data.projects
+                    {activeProjects
                       .filter((p) => p.portfolio_id === port.id)
                       .map((proj) => {
                         const pTasks = data.tasks.filter((t) => t.project_id === proj.id);
@@ -1290,6 +1481,75 @@ export default function BangClickBoomApp() {
             >
               Create Project (with Default Task Fields)
             </button>
+          </form>
+        </div>
+      )}
+
+      {/* Modal: Confirm Permanent Project Deletion */}
+      {projectToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const expected = `Delete ${projectToDelete.name}`;
+              if (deleteConfirmText !== expected) return;
+              const deletedName = projectToDelete.name;
+              const deletedId = projectToDelete.id;
+              setProjectToDelete(null);
+              setDeleteConfirmText("");
+              await apiAction({ action: "delete_project", project_id: deletedId });
+              if (activeView === deletedId) setActiveView("dashboard");
+              triggerToast(`Permanently deleted "${deletedName}"`);
+            }}
+            className="bg-bcb-coffee border border-red-900/70 rounded-xl max-w-md w-full p-6 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between border-b border-bcb-border pb-3">
+              <h3 className="text-lg font-bold text-red-400 flex items-center gap-2">
+                <Trash2 className="w-5 h-5" />
+                Delete Project
+              </h3>
+              <button
+                type="button"
+                onClick={() => setProjectToDelete(null)}
+                className="text-stone-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-xs text-stone-300 leading-relaxed">
+              This will permanently remove <strong className="text-white">{projectToDelete.name}</strong> and all of
+              its sections, tasks, and custom field values from the database. This cannot be undone.
+            </p>
+            <div>
+              <label className="text-xs text-stone-300 font-medium block mb-1.5">
+                Type <span className="font-mono text-bcb-tea bg-bcb-canvas px-1.5 py-0.5 rounded">Delete {projectToDelete.name}</span> to confirm:
+              </label>
+              <input
+                type="text"
+                autoFocus
+                required
+                value={deleteConfirmText}
+                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                placeholder={`Delete ${projectToDelete.name}`}
+                className="w-full bg-bcb-canvas border border-bcb-border rounded-lg px-3 py-2 text-sm text-white focus:border-red-500 focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setProjectToDelete(null)}
+                className="px-4 py-2 rounded-lg bg-bcb-surface hover:bg-bcb-border text-xs font-semibold text-stone-200 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={deleteConfirmText !== `Delete ${projectToDelete.name}`}
+                className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold transition"
+              >
+                Permanently Delete
+              </button>
+            </div>
           </form>
         </div>
       )}

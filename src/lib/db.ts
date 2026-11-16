@@ -21,6 +21,7 @@ export interface Project {
   description: string;
   status: string;
   icon: string;
+  is_archived: number;
 }
 
 export interface Section {
@@ -92,6 +93,7 @@ function initSchemaAndSeed(db: DatabaseSync) {
       description TEXT DEFAULT '',
       status TEXT DEFAULT 'On Track',
       icon TEXT DEFAULT 'FolderKanban',
+      is_archived INTEGER DEFAULT 0,
       FOREIGN KEY (portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE
     );
 
@@ -320,12 +322,17 @@ function initSchemaAndSeed(db: DatabaseSync) {
 function applyMigrationsAndCleanup(db: DatabaseSync) {
   const now = new Date().toISOString();
 
-  // 0. Ensure completed_at column exists and backfill completed tasks
+  // 0. Ensure completed_at and is_archived columns exist and backfill
   const cols = db.prepare("PRAGMA table_info(tasks)").all() as unknown as { name: string }[];
   if (!cols.some((c) => c.name === "completed_at")) {
     db.exec("ALTER TABLE tasks ADD COLUMN completed_at TEXT;");
   }
   db.prepare("UPDATE tasks SET completed_at = updated_at WHERE completed = 1 AND completed_at IS NULL").run();
+
+  const projCols = db.prepare("PRAGMA table_info(projects)").all() as unknown as { name: string }[];
+  if (!projCols.some((c) => c.name === "is_archived")) {
+    db.exec("ALTER TABLE projects ADD COLUMN is_archived INTEGER DEFAULT 0;");
+  }
 
   // 1. Remove any Budget / currency custom fields and values
   db.prepare("DELETE FROM custom_field_defs WHERE LOWER(name) = 'budget' OR field_type = 'currency'").run();
@@ -488,6 +495,9 @@ function applyMigrationsAndCleanup(db: DatabaseSync) {
   ).run(now);
   db.prepare(
     "UPDATE tasks SET completed = 1, completed_at = COALESCE(completed_at, ?), section_id = 'sec-feat-done' WHERE id = 'feat-task-1' AND completed = 0"
+  ).run(now);
+  db.prepare(
+    "UPDATE tasks SET completed = 1, completed_at = COALESCE(completed_at, ?), section_id = 'sec-feat-done' WHERE id = 'feat-task-5' AND completed = 0"
   ).run(now);
   db.prepare("DELETE FROM tasks WHERE id = 'feat-task-3'").run();
 
