@@ -23,6 +23,7 @@ import {
   Menu,
   Archive,
   ArchiveRestore,
+  Calendar,
 } from "lucide-react";
 import BurnupChart from "@/components/BurnupChart";
 
@@ -1037,20 +1038,33 @@ export default function BangClickBoomApp() {
                                   </select>
                                 </td>
 
-                                {/* Due Date Input */}
+                                {/* Due Date Pill (Blank space + Calendar icon when empty) */}
                                 <td className="py-2 px-3">
-                                  <input
-                                    type="date"
-                                    value={task.due_date || ""}
-                                    onChange={(e) =>
-                                      apiAction({
-                                        action: "update_task",
-                                        id: task.id,
-                                        due_date: e.target.value || null,
-                                      })
-                                    }
-                                    className="bg-transparent text-xs text-stone-300 border border-transparent hover:border-bcb-border focus:border-bcb-cerulean rounded px-2 py-1 focus:outline-none"
-                                  />
+                                  <label className="relative inline-flex items-center justify-between w-28 px-2.5 py-1 rounded-full border border-bcb-border bg-bcb-canvas hover:border-bcb-cerulean text-xs cursor-pointer transition">
+                                    <span className={task.due_date ? "text-stone-200 font-medium" : "text-transparent select-none"}>
+                                      {task.due_date
+                                        ? `${task.due_date.slice(5, 7)}/${task.due_date.slice(8, 10)}/${task.due_date.slice(2, 4)}`
+                                        : "\u00A0"}
+                                    </span>
+                                    <Calendar className={`w-3.5 h-3.5 shrink-0 ${task.due_date ? "text-bcb-tea" : "text-stone-400"}`} />
+                                    <input
+                                      type="date"
+                                      value={task.due_date || ""}
+                                      onClick={(e) => {
+                                        try {
+                                          (e.currentTarget as HTMLInputElement).showPicker?.();
+                                        } catch {}
+                                      }}
+                                      onChange={(e) =>
+                                        apiAction({
+                                          action: "update_task",
+                                          id: task.id,
+                                          due_date: e.target.value || null,
+                                        })
+                                      }
+                                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                    />
+                                  </label>
                                 </td>
 
                                 {/* Dynamic Custom Task Fields */}
