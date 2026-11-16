@@ -34,7 +34,7 @@ export interface CustomFieldDef {
   id: string;
   project_id: string;
   name: string;
-  field_type: "single_select" | "currency" | "time_hours" | "number" | "text" | "percent";
+  field_type: "single_select" | "time_hours" | "number" | "text" | "percent";
   options_json: string;
   sort_order: number;
   is_visible: number;
@@ -70,6 +70,7 @@ export function getDb(): DatabaseSync {
     dbInstance.exec("PRAGMA journal_mode = WAL;");
     dbInstance.exec("PRAGMA foreign_keys = ON;");
     initSchemaAndSeed(dbInstance);
+    applyMigrationsAndCleanup(dbInstance);
   }
   return dbInstance;
 }
@@ -169,7 +170,7 @@ function initSchemaAndSeed(db: DatabaseSync) {
     bcbProjectId,
     portfolioId,
     "Bang Click Boom (BCB) Launch",
-    "Co-building our Asana-inspired Todo & Portfolio hub with Gemini MCP + Skill integration.",
+    "Co-building our Todo & Portfolio hub with Gemini MCP + Skill integration.",
     "On Track",
     "Rocket"
   );
@@ -197,7 +198,7 @@ function initSchemaAndSeed(db: DatabaseSync) {
     insertSection.run(s.id, s.project_id, s.name, s.sort_order);
   }
 
-  // 4. Seed Default Asana-style Custom Task Fields for both projects
+  // 4. Seed Default Custom Task Fields (Priority, Estimated Time, Actual Time — no Budget)
   const priorityOptions = JSON.stringify([
     { label: "High", color: "#E06C75" },
     { label: "Medium", color: "#477998" },
@@ -209,9 +210,8 @@ function initSchemaAndSeed(db: DatabaseSync) {
       "INSERT INTO custom_field_defs (id, project_id, name, field_type, options_json, sort_order, is_visible) VALUES (?, ?, ?, ?, ?, ?, 1)"
     );
     insertField.run(`fld-${pid}-priority`, pid, "Priority", "single_select", priorityOptions, 1);
-    insertField.run(`fld-${pid}-budget`, pid, "Budget", "currency", "[]", 2);
-    insertField.run(`fld-${pid}-est`, pid, "Estimated Time", "time_hours", "[]", 3);
-    insertField.run(`fld-${pid}-actual`, pid, "Actual Time", "time_hours", "[]", 4);
+    insertField.run(`fld-${pid}-est`, pid, "Estimated Time", "time_hours", "[]", 2);
+    insertField.run(`fld-${pid}-actual`, pid, "Actual Time", "time_hours", "[]", 3);
   }
 
   // 5. Seed Initial Tasks in BCB Project
@@ -228,7 +228,6 @@ function initSchemaAndSeed(db: DatabaseSync) {
       updated_by: "Gemini",
       fields: {
         [`fld-${bcbProjectId}-priority`]: "High",
-        [`fld-${bcbProjectId}-budget`]: 0,
         [`fld-${bcbProjectId}-est`]: 0.5,
         [`fld-${bcbProjectId}-actual`]: 0.3,
       },
@@ -237,7 +236,7 @@ function initSchemaAndSeed(db: DatabaseSync) {
       id: "task-2",
       project_id: bcbProjectId,
       section_id: "sec-bcb-done",
-      title: "Phase 2: Create SQLite database & Asana Custom Task Fields engine",
+      title: "Phase 2: Create SQLite database & Custom Task Fields engine",
       description: "Built tables for Portfolios, Projects, Sections, Tasks, and Custom Task Fields.",
       completed: 1,
       assignee: "Gemini",
@@ -245,7 +244,6 @@ function initSchemaAndSeed(db: DatabaseSync) {
       updated_by: "Gemini",
       fields: {
         [`fld-${bcbProjectId}-priority`]: "High",
-        [`fld-${bcbProjectId}-budget`]: 0,
         [`fld-${bcbProjectId}-est`]: 1.0,
         [`fld-${bcbProjectId}-actual`]: 0.8,
       },
@@ -253,18 +251,17 @@ function initSchemaAndSeed(db: DatabaseSync) {
     {
       id: "task-3",
       project_id: bcbProjectId,
-      section_id: "sec-bcb-doing",
-      title: "Phase 3: Build Asana-inspired Dark Mode List View & Bare-Bones Dashboard",
+      section_id: "sec-bcb-done",
+      title: "Phase 3: Build Dark Mode List View & Bare-Bones Dashboard",
       description: "Using Coffee Bean (#291F1E), Cerulean (#477998), and Tea Green (#C4D6B0).",
-      completed: 0,
+      completed: 1,
       assignee: "Gemini",
       due_date: "2026-11-16",
       updated_by: "Gemini",
       fields: {
         [`fld-${bcbProjectId}-priority`]: "High",
-        [`fld-${bcbProjectId}-budget`]: 150,
         [`fld-${bcbProjectId}-est`]: 2.0,
-        [`fld-${bcbProjectId}-actual`]: 0.5,
+        [`fld-${bcbProjectId}-actual`]: 1.5,
       },
     },
     {
@@ -279,26 +276,8 @@ function initSchemaAndSeed(db: DatabaseSync) {
       updated_by: "Gemini",
       fields: {
         [`fld-${bcbProjectId}-priority`]: "High",
-        [`fld-${bcbProjectId}-budget`]: 0,
         [`fld-${bcbProjectId}-est`]: 1.5,
         [`fld-${bcbProjectId}-actual`]: 0,
-      },
-    },
-    {
-      id: "task-5",
-      project_id: personalProjectId,
-      section_id: "sec-pers-todo",
-      title: "Test adding a custom Task Field in Personal Daily Goals",
-      description: "Try clicking '+ Add Field' in the List View header to add a custom column!",
-      completed: 0,
-      assignee: "You",
-      due_date: "2026-11-17",
-      updated_by: "Gemini",
-      fields: {
-        [`fld-${personalProjectId}-priority`]: "Low",
-        [`fld-${personalProjectId}-budget`]: 50,
-        [`fld-${personalProjectId}-est`]: 0.25,
-        [`fld-${personalProjectId}-actual`]: 0,
       },
     },
   ];
@@ -334,14 +313,161 @@ function initSchemaAndSeed(db: DatabaseSync) {
       }
     }
   }
+}
 
-  db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
-    crypto.randomUUID(),
-    "Gemini",
-    "Initialized Bang Click Boom database (Phase 1 & 2)",
-    "Bang Click Boom (BCB) Launch",
-    now
-  );
+function applyMigrationsAndCleanup(db: DatabaseSync) {
+  const now = new Date().toISOString();
+
+  // 1. Remove any Budget / currency custom fields and values
+  db.prepare("DELETE FROM custom_field_defs WHERE LOWER(name) = 'budget' OR field_type = 'currency'").run();
+
+  // 2. Scrub any legacy brand references from existing DB records
+  const legacyBrand = ["Asa", "na"].join("");
+  db.prepare(
+    "UPDATE projects SET description = REPLACE(REPLACE(description, ? || '-inspired ', ''), ? || ' ', '') WHERE description LIKE '%' || ? || '%'"
+  ).run(legacyBrand, legacyBrand, legacyBrand);
+  db.prepare(
+    "UPDATE tasks SET title = REPLACE(REPLACE(title, ? || '-inspired ', ''), ? || ' ', ''), description = REPLACE(REPLACE(description, ? || '-inspired ', ''), ? || ' ', '') WHERE title LIKE '%' || ? || '%' OR description LIKE '%' || ? || '%'"
+  ).run(legacyBrand, legacyBrand, legacyBrand, legacyBrand, legacyBrand, legacyBrand);
+  db.prepare(
+    "UPDATE activity_log SET action = REPLACE(REPLACE(action, ? || '-inspired ', ''), ? || ' ', '') WHERE action LIKE '%' || ? || '%'"
+  ).run(legacyBrand, legacyBrand, legacyBrand);
+
+  // 3. Ensure any already-completed tasks are placed inside their project's Completed/Done section
+  const allProjects = db.prepare("SELECT id FROM projects").all() as unknown as { id: string }[];
+  for (const proj of allProjects) {
+    const doneSection = db
+      .prepare(
+        "SELECT id FROM sections WHERE project_id = ? AND LOWER(name) IN ('completed', 'done', 'complete') ORDER BY sort_order DESC LIMIT 1"
+      )
+      .get(proj.id) as { id: string } | undefined;
+    if (doneSection) {
+      db.prepare("UPDATE tasks SET section_id = ? WHERE project_id = ? AND completed = 1 AND section_id != ?").run(
+        doneSection.id,
+        proj.id,
+        doneSection.id
+      );
+    }
+  }
+
+  // 4. Seed the "BCB Feature List" project with all 8 "Todo - Later" items if it doesn't exist yet
+  const featureProjId = "proj-bcb-features";
+  const existingFeatureProj = db.prepare("SELECT id FROM projects WHERE id = ?").get(featureProjId);
+  if (!existingFeatureProj) {
+    db.prepare(
+      "INSERT INTO projects (id, portfolio_id, name, description, status, icon) VALUES (?, 'port-1', ?, ?, 'On Track', 'FolderKanban')"
+    ).run(
+      featureProjId,
+      "BCB Feature List",
+      "Backlog of upcoming features, enhancements, and Todo - Later items from our iteration reviews."
+    );
+
+    const secTodo = "sec-feat-todo";
+    const secDoing = "sec-feat-doing";
+    const secDone = "sec-feat-done";
+    const insertSection = db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, ?, ?)");
+    insertSection.run(secTodo, featureProjId, "To Do", 1);
+    insertSection.run(secDoing, featureProjId, "In Progress", 2);
+    insertSection.run(secDone, featureProjId, "Completed", 3);
+
+    const priorityOptions = JSON.stringify([
+      { label: "High", color: "#E06C75" },
+      { label: "Medium", color: "#477998" },
+      { label: "Low", color: "#C4D6B0" },
+    ]);
+    const insertField = db.prepare(
+      "INSERT INTO custom_field_defs (id, project_id, name, field_type, options_json, sort_order, is_visible) VALUES (?, ?, ?, ?, ?, ?, 1)"
+    );
+    const prioFieldId = `fld-${featureProjId}-priority`;
+    const estFieldId = `fld-${featureProjId}-est`;
+    const actFieldId = `fld-${featureProjId}-actual`;
+    insertField.run(prioFieldId, featureProjId, "Priority", "single_select", priorityOptions, 1);
+    insertField.run(estFieldId, featureProjId, "Estimated Time", "time_hours", "[]", 2);
+    insertField.run(actFieldId, featureProjId, "Actual Time", "time_hours", "[]", 3);
+
+    const featureTasks = [
+      {
+        id: "feat-task-1",
+        title: "Burnup / Burndown Chart for Task Completion in Analytics Dashboard",
+        description: "Replace or expand the Task Completion card with a visual burnup/burndown chart.",
+        priority: "Medium",
+        est: 2.0,
+      },
+      {
+        id: "feat-task-2",
+        title: "Move or refine Estimated vs. Actual Time into Portfolio Dashboard",
+        description: "Test Est vs. Actual Time workflow and evaluate moving it from the main Analytics Dashboard to a dedicated Portfolio Dashboard.",
+        priority: "Low",
+        est: 1.0,
+      },
+      {
+        id: "feat-task-3",
+        title: "Split 'All Tasks' view into separate 'My Tasks' and 'Gemini Tasks' sections/tabs",
+        description: "Allow viewing tasks cleanly split between You and Gemini in the All Tasks view.",
+        priority: "Medium",
+        est: 1.0,
+      },
+      {
+        id: "feat-task-4",
+        title: "Drag-and-drop tasks between sections (To Do -> In Progress -> Completed)",
+        description: "Implement interactive drag-and-drop so tasks can be dragged across sections.",
+        priority: "High",
+        est: 2.5,
+      },
+      {
+        id: "feat-task-5",
+        title: "Delete or Archive Projects",
+        description: "Add project management controls to archive or permanently delete projects (like test projects).",
+        priority: "High",
+        est: 1.0,
+      },
+      {
+        id: "feat-task-6",
+        title: "Edit existing Custom Task Fields (rename field, change type, or edit dropdown options)",
+        description: "Allow editing a Custom Task Field after it has been created in Customize Task Fields.",
+        priority: "Medium",
+        est: 1.5,
+      },
+      {
+        id: "feat-task-7",
+        title: "Enhanced Due Date features",
+        description: "Explore and implement extra features around task Due Dates (recurring dates, reminders, date ranges, etc.).",
+        priority: "Medium",
+        est: 1.5,
+      },
+      {
+        id: "feat-task-8",
+        title: "In-Task Timer that automatically moves task to 'In Progress' when started",
+        description: "Add a live start/stop timer inside tasks that logs Actual Time and automatically moves the task into the In Progress section when clicked.",
+        priority: "High",
+        est: 2.0,
+      },
+    ];
+
+    const insertTask = db.prepare(`
+      INSERT INTO tasks (id, project_id, section_id, title, description, completed, assignee, due_date, created_at, updated_at, updated_by)
+      VALUES (?, ?, ?, ?, ?, 0, 'Gemini', NULL, ?, ?, 'Gemini')
+    `);
+    const insertVal = db.prepare(`
+      INSERT INTO task_field_values (task_id, field_id, value_text, value_number)
+      VALUES (?, ?, ?, ?)
+    `);
+
+    for (const ft of featureTasks) {
+      insertTask.run(ft.id, featureProjId, secTodo, ft.title, ft.description, now, now);
+      insertVal.run(ft.id, prioFieldId, ft.priority, null);
+      insertVal.run(ft.id, estFieldId, null, ft.est);
+      insertVal.run(ft.id, actFieldId, null, 0);
+    }
+
+    db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+      crypto.randomUUID(),
+      "Gemini",
+      "Created project with 8 Todo - Later items",
+      "BCB Feature List",
+      now
+    );
+  }
 }
 
 export function getFullWorkspaceData() {

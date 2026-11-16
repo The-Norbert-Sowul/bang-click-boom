@@ -63,7 +63,25 @@ export async function POST(req: NextRequest) {
       const newCompleted = completed !== undefined ? (completed ? 1 : 0) : existing.completed;
       const newAssignee = assignee !== undefined ? assignee : existing.assignee;
       const newDueDate = due_date !== undefined ? due_date : existing.due_date;
-      const newSectionId = section_id !== undefined ? section_id : existing.section_id;
+
+      // Automatically move task to "Completed"/"Done" section when marked complete,
+      // or back to the first section ("To Do") when reopened if no explicit section_id was passed
+      let newSectionId = section_id !== undefined ? section_id : existing.section_id;
+      if (completed !== undefined && section_id === undefined) {
+        if (newCompleted === 1) {
+          const doneSec = db
+            .prepare(
+              "SELECT id FROM sections WHERE project_id = ? AND LOWER(name) IN ('completed', 'done', 'complete') ORDER BY sort_order DESC LIMIT 1"
+            )
+            .get(existing.project_id) as { id: string } | undefined;
+          if (doneSec) newSectionId = doneSec.id;
+        } else {
+          const todoSec = db
+            .prepare("SELECT id FROM sections WHERE project_id = ? ORDER BY sort_order ASC LIMIT 1")
+            .get(existing.project_id) as { id: string } | undefined;
+          if (todoSec) newSectionId = todoSec.id;
+        }
+      }
 
       db.prepare(`
         UPDATE tasks
@@ -178,9 +196,8 @@ export async function POST(req: NextRequest) {
         "INSERT INTO custom_field_defs (id, project_id, name, field_type, options_json, sort_order, is_visible) VALUES (?, ?, ?, ?, ?, ?, 1)"
       );
       insertField.run(`fld-${id}-priority`, id, "Priority", "single_select", priorityOptions, 1);
-      insertField.run(`fld-${id}-budget`, id, "Budget", "currency", "[]", 2);
-      insertField.run(`fld-${id}-est`, id, "Estimated Time", "time_hours", "[]", 3);
-      insertField.run(`fld-${id}-actual`, id, "Actual Time", "time_hours", "[]", 4);
+      insertField.run(`fld-${id}-est`, id, "Estimated Time", "time_hours", "[]", 2);
+      insertField.run(`fld-${id}-actual`, id, "Actual Time", "time_hours", "[]", 3);
 
       return NextResponse.json(getFullWorkspaceData());
     }

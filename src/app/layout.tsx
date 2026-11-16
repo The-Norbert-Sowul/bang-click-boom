@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Bang Click Boom (BCB) — Asana-Inspired AI Co-Working Hub",
+  title: "Bang Click Boom (BCB) — AI Co-Working Hub",
   description: "Personal Todo lists, projects, and portfolios co-managed with Gemini",
 };
 

@@ -2,7 +2,7 @@
   "name": "bang-click-boom",
   "version": "0.1.0",
   "private": true,
-  "description": "Bang Click Boom (BCB) - Asana-inspired Todo, Project, and Portfolio app with Gemini MCP & Skill integration",
+  "description": "Bang Click Boom (BCB) - Todo, Project, and Portfolio app with Gemini MCP & Skill integration",
   "scripts": {
     "dev": "next dev --port 3000",
     "build": "next build",

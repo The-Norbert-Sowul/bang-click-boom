@@ -9,15 +9,12 @@ import {
   FolderKanban,
   Briefcase,
   Sparkles,
-  User,
-  Calendar,
   SlidersHorizontal,
   ChevronDown,
   ChevronRight,
   Trash2,
   Save,
   Clock,
-  DollarSign,
   Eye,
   EyeOff,
   X,
@@ -53,7 +50,7 @@ interface CustomFieldDef {
   id: string;
   project_id: string;
   name: string;
-  field_type: "single_select" | "currency" | "time_hours" | "number" | "text" | "percent";
+  field_type: "single_select" | "time_hours" | "number" | "text" | "percent";
   options_json: string;
   sort_order: number;
   is_visible: number;
@@ -152,7 +149,7 @@ export default function BangClickBoomApp() {
 
   function triggerToast(msg: string) {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
+    setTimeout(() => setToastMessage(null), 4000);
   }
 
   if (!data) {
@@ -181,7 +178,6 @@ export default function BangClickBoomApp() {
   const geminiTasks = data.tasks.filter((t) => t.assignee === "Gemini").length;
   const yourTasks = data.tasks.filter((t) => t.assignee === "You").length;
 
-  let totalBudget = 0;
   let totalEstHours = 0;
   let totalActualHours = 0;
 
@@ -190,7 +186,6 @@ export default function BangClickBoomApp() {
     for (const f of pFields) {
       const val = Number(t.field_values[f.id] || 0);
       if (!isNaN(val)) {
-        if (f.field_type === "currency") totalBudget += val;
         if (f.name.toLowerCase().includes("estimated")) totalEstHours += val;
         if (f.name.toLowerCase().includes("actual")) totalActualHours += val;
       }
@@ -250,19 +245,19 @@ export default function BangClickBoomApp() {
     if (updated?.projects?.length) {
       setActiveView(updated.projects[updated.projects.length - 1].id);
     }
-    triggerToast(`Created project "${newProjectName.trim()}" with default Asana Task Fields`);
+    triggerToast(`Created project "${newProjectName.trim()}" with default Task Fields`);
   }
 
   async function handleBackupDb() {
     const res = await apiAction({ action: "backup_db" });
     if (res?.backupFile) {
-      triggerToast(`Snapshot saved to /backups!`);
+      triggerToast(`Snapshot saved to: ${res.backupFile}`);
     }
   }
 
   return (
     <div className="min-h-screen flex bg-bcb-canvas text-stone-100">
-      {/* Left Sidebar (Asana-style Dark Coffee Bean) */}
+      {/* Left Sidebar (Dark Coffee Bean) */}
       <aside className="w-64 bg-bcb-coffee border-r border-bcb-border flex flex-col justify-between shrink-0">
         <div>
           {/* Brand Header */}
@@ -395,7 +390,7 @@ export default function BangClickBoomApp() {
               <div>
                 <h2 className="text-2xl font-bold text-white">Analytics Dashboard</h2>
                 <p className="text-sm text-stone-400 mt-1">
-                  Bare-bones overview of tasks, Custom Field rollups, and You vs. Gemini progress.
+                  Overview of tasks, Custom Field rollups, and You vs. Gemini progress.
                 </p>
               </div>
               <span className="px-3 py-1 rounded-full text-xs font-medium bg-bcb-coffee border border-bcb-border text-bcb-tea">
@@ -403,8 +398,8 @@ export default function BangClickBoomApp() {
               </span>
             </div>
 
-            {/* Metric Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Metric Cards (3 Cards - Budget Removed) */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-5">
                 <div className="flex items-center justify-between text-stone-400 text-xs font-semibold uppercase">
                   <span>Task Completion</span>
@@ -468,21 +463,6 @@ export default function BangClickBoomApp() {
                   Rolled up from project Time custom fields
                 </p>
               </div>
-
-              <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-5">
-                <div className="flex items-center justify-between text-stone-400 text-xs font-semibold uppercase">
-                  <span>Total Project Budget</span>
-                  <DollarSign className="w-4 h-4 text-bcb-tea" />
-                </div>
-                <div className="mt-3">
-                  <span className="text-3xl font-bold text-bcb-tea">
-                    ${totalBudget.toLocaleString()}
-                  </span>
-                </div>
-                <p className="text-xs text-stone-400 mt-3">
-                  Sum of Budget Task Fields across all tasks
-                </p>
-              </div>
             </div>
 
             {/* Recent Co-Working Activity Feed */}
@@ -529,7 +509,7 @@ export default function BangClickBoomApp() {
               <div>
                 <h2 className="text-2xl font-bold text-white">Portfolios</h2>
                 <p className="text-sm text-stone-400 mt-1">
-                  High-level Asana-style view grouping your projects and their progress.
+                  High-level executive view grouping your projects and their progress.
                 </p>
               </div>
               <button
@@ -676,7 +656,7 @@ export default function BangClickBoomApp() {
           </div>
         )}
 
-        {/* VIEW 4: ASANA-INSPIRED PROJECT LIST VIEW WITH DYNAMIC CUSTOM FIELDS */}
+        {/* VIEW 4: PROJECT LIST VIEW WITH DYNAMIC CUSTOM FIELDS */}
         {activeProject && (
           <div className="flex-1 flex flex-col overflow-hidden">
             {/* Project Header */}
@@ -702,7 +682,7 @@ export default function BangClickBoomApp() {
               </div>
             </header>
 
-            {/* Spreadsheet-style Asana List View */}
+            {/* Spreadsheet-style List View */}
             <div className="flex-1 overflow-auto p-6">
               <div className="bg-bcb-coffee border border-bcb-border rounded-xl overflow-x-auto shadow-lg">
                 <table className="w-full text-left border-collapse text-sm min-w-[850px]">
@@ -845,7 +825,7 @@ export default function BangClickBoomApp() {
                                   />
                                 </td>
 
-                                {/* Dynamic Asana Custom Task Fields */}
+                                {/* Dynamic Custom Task Fields */}
                                 {visibleProjectFields.map((field) => {
                                   const rawVal = task.field_values[field.id] ?? "";
                                   if (field.field_type === "single_select") {
@@ -885,7 +865,6 @@ export default function BangClickBoomApp() {
                                   }
 
                                   const isNumeric =
-                                    field.field_type === "currency" ||
                                     field.field_type === "time_hours" ||
                                     field.field_type === "number" ||
                                     field.field_type === "percent";
@@ -893,9 +872,6 @@ export default function BangClickBoomApp() {
                                   return (
                                     <td key={field.id} className="py-2 px-3">
                                       <div className="flex items-center gap-1">
-                                        {field.field_type === "currency" && (
-                                          <span className="text-xs text-bcb-tea">$</span>
-                                        )}
                                         <input
                                           type={isNumeric ? "number" : "text"}
                                           step={isNumeric ? "0.25" : undefined}
@@ -1086,7 +1062,7 @@ export default function BangClickBoomApp() {
 
             <div>
               <label className="text-[11px] uppercase tracking-wider text-stone-400 font-semibold">
-                Description & Co-Working Notes
+                Task Notes
               </label>
               <textarea
                 rows={5}
@@ -1120,7 +1096,7 @@ export default function BangClickBoomApp() {
         </aside>
       )}
 
-      {/* Modal: Customize Asana Task Fields */}
+      {/* Modal: Customize Task Fields */}
       {showCustomizeModal && activeProject && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
           <div className="bg-bcb-coffee border border-bcb-border rounded-xl max-w-lg w-full p-6 space-y-6 shadow-2xl">
@@ -1130,7 +1106,7 @@ export default function BangClickBoomApp() {
                   Customize Task Fields — {activeProject.name}
                 </h3>
                 <p className="text-xs text-stone-400">
-                  Add, toggle visibility, or remove Asana-style custom properties for this project.
+                  Add, toggle visibility, or remove custom properties for this project.
                 </p>
               </div>
               <button
@@ -1200,7 +1176,7 @@ export default function BangClickBoomApp() {
                   required
                   value={newFieldName}
                   onChange={(e) => setNewFieldName(e.target.value)}
-                  placeholder="Field name (e.g. Sprint, ROI)"
+                  placeholder="Field name (e.g. Sprint, Stage)"
                   className="bg-bcb-canvas border border-bcb-border rounded-lg px-3 py-2 text-xs text-white focus:border-bcb-cerulean focus:outline-none"
                 />
                 <select
@@ -1210,7 +1186,6 @@ export default function BangClickBoomApp() {
                 >
                   <option value="text">Text</option>
                   <option value="number">Number</option>
-                  <option value="currency">Currency ($)</option>
                   <option value="time_hours">Time (Hours)</option>
                   <option value="percent">Percent (%)</option>
                   <option value="single_select">Single-Select Dropdown</option>
@@ -1282,7 +1257,7 @@ export default function BangClickBoomApp() {
               type="submit"
               className="w-full py-2.5 rounded-lg bg-bcb-cerulean hover:bg-bcb-cerulean-light text-white text-sm font-semibold transition"
             >
-              Create Project (with Default Asana Fields)
+              Create Project (with Default Task Fields)
             </button>
           </form>
         </div>
