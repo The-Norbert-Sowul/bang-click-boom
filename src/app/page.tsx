@@ -398,70 +398,180 @@ export default function BangClickBoomApp() {
               </span>
             </div>
 
-            {/* Metric Cards (3 Cards - Budget Removed) */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-5">
-                <div className="flex items-center justify-between text-stone-400 text-xs font-semibold uppercase">
-                  <span>Task Completion</span>
+            {/* Note: yourTasks / geminiTasks Co-Working Split metrics are retained in state for future reuse */}
+            {/* Project Task Completion Widget */}
+            <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-bcb-border pb-4">
+                <div className="flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 text-bcb-tea" />
+                  <h3 className="font-semibold text-white text-sm uppercase tracking-wider">
+                    Project Task Completion
+                  </h3>
                 </div>
-                <div className="mt-3 flex items-baseline gap-2">
-                  <span className="text-3xl font-bold text-white">
-                    {completedTasks} / {totalTasks}
-                  </span>
-                  <span className="text-xs text-bcb-tea">
-                    ({totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0}%)
-                  </span>
-                </div>
-                <div className="mt-3 w-full h-2 rounded-full bg-bcb-canvas overflow-hidden">
-                  <div
-                    className="h-full bg-bcb-tea transition-all"
-                    style={{
-                      width: `${totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0}%`,
-                    }}
-                  />
+
+                {/* Total Summary Section */}
+                <div className="flex items-center gap-5 bg-bcb-canvas px-4 py-2 rounded-lg border border-bcb-border text-xs">
+                  <div>
+                    <span className="text-stone-400 uppercase font-semibold mr-2">Total Incomplete:</span>
+                    <span className="text-sm font-bold text-white">{totalTasks - completedTasks}</span>
+                  </div>
+                  <div className="h-4 w-px bg-bcb-border" />
+                  <div>
+                    <span className="text-stone-400 uppercase font-semibold mr-2">Total Complete:</span>
+                    <span className="text-sm font-bold text-bcb-tea">{completedTasks}</span>
+                  </div>
+                  <div className="h-4 w-px bg-bcb-border" />
+                  <div>
+                    <span className="text-stone-400 uppercase font-semibold mr-2">Overall:</span>
+                    <span className="text-sm font-bold text-bcb-cerulean-light">
+                      {totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0}%
+                    </span>
+                  </div>
                 </div>
               </div>
 
-              <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-5">
-                <div className="flex items-center justify-between text-stone-400 text-xs font-semibold uppercase">
-                  <span>Co-Working Split</span>
-                  <Sparkles className="w-4 h-4 text-bcb-cerulean-light" />
-                </div>
-                <div className="mt-3 flex items-baseline justify-between">
-                  <div>
-                    <span className="text-2xl font-bold text-white">{yourTasks}</span>
-                    <span className="text-xs text-stone-400 ml-1.5">Assigned to You</span>
-                  </div>
-                  <div>
-                    <span className="text-2xl font-bold text-bcb-tea">{geminiTasks}</span>
-                    <span className="text-xs text-stone-400 ml-1.5">Gemini</span>
-                  </div>
-                </div>
-                <p className="text-xs text-stone-400 mt-3">
-                  Shared ownership across {data.projects.length} active projects
-                </p>
-              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-bcb-border text-[11px] uppercase tracking-wider text-stone-400">
+                      <th className="py-2.5 pr-4">Project</th>
+                      <th className="py-2.5 px-4 w-36">Incomplete Tasks</th>
+                      <th className="py-2.5 px-4 w-36">Complete Tasks</th>
+                      <th className="py-2.5 pl-4 min-w-[240px]">Progress Bar</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-bcb-border">
+                    {data.projects.map((proj) => {
+                      const pTasks = data.tasks.filter((t) => t.project_id === proj.id);
+                      const pComplete = pTasks.filter((t) => t.completed === 1).length;
+                      const pIncomplete = pTasks.length - pComplete;
+                      const pct = pTasks.length > 0 ? Math.round((pComplete / pTasks.length) * 100) : 0;
 
-              <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-5">
-                <div className="flex items-center justify-between text-stone-400 text-xs font-semibold uppercase">
-                  <span>Est. vs Actual Time</span>
+                      return (
+                        <tr
+                          key={proj.id}
+                          onClick={() => setActiveView(proj.id)}
+                          className="hover:bg-bcb-surface/70 cursor-pointer transition"
+                        >
+                          <td className="py-3 pr-4 font-medium text-white">{proj.name}</td>
+                          <td className="py-3 px-4 text-stone-200 font-semibold">{pIncomplete}</td>
+                          <td className="py-3 px-4 text-bcb-tea font-semibold">{pComplete}</td>
+                          <td className="py-3 pl-4">
+                            <div className="flex items-center gap-3">
+                              <div className="flex-1 h-2.5 rounded-full bg-bcb-canvas overflow-hidden border border-bcb-border/60">
+                                <div
+                                  className="h-full bg-bcb-tea transition-all"
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                              <span className="text-xs font-semibold w-12 text-right text-bcb-tea">
+                                {pct}%
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Project Time Breakdown Widget (Actual vs Estimated) */}
+            <div className="bg-bcb-coffee border border-bcb-border rounded-xl p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-bcb-border pb-4">
+                <div className="flex items-center gap-2">
                   <Clock className="w-4 h-4 text-bcb-cerulean-light" />
+                  <h3 className="font-semibold text-white text-sm uppercase tracking-wider">
+                    Project Time Breakdown (Actual vs. Estimated)
+                  </h3>
                 </div>
-                <div className="mt-3 flex items-baseline gap-3">
+
+                {/* Total Summary Section */}
+                <div className="flex items-center gap-5 bg-bcb-canvas px-4 py-2 rounded-lg border border-bcb-border text-xs">
                   <div>
-                    <span className="text-2xl font-bold text-white">{totalActualHours.toFixed(1)}h</span>
-                    <span className="text-xs text-stone-400 ml-1">actual</span>
+                    <span className="text-stone-400 uppercase font-semibold mr-2">Total Actual:</span>
+                    <span className="text-sm font-bold text-white">{totalActualHours.toFixed(2)}h</span>
                   </div>
-                  <span className="text-stone-500">/</span>
+                  <div className="h-4 w-px bg-bcb-border" />
                   <div>
-                    <span className="text-lg font-semibold text-bcb-tea">{totalEstHours.toFixed(1)}h</span>
-                    <span className="text-xs text-stone-400 ml-1">est.</span>
+                    <span className="text-stone-400 uppercase font-semibold mr-2">Total Estimate:</span>
+                    <span className="text-sm font-bold text-bcb-tea">{totalEstHours.toFixed(2)}h</span>
+                  </div>
+                  <div className="h-4 w-px bg-bcb-border" />
+                  <div>
+                    <span className="text-stone-400 uppercase font-semibold mr-2">Overall:</span>
+                    <span className="text-sm font-bold text-bcb-cerulean-light">
+                      {totalEstHours > 0 ? Math.round((totalActualHours / totalEstHours) * 100) : 0}%
+                    </span>
                   </div>
                 </div>
-                <p className="text-xs text-stone-400 mt-3">
-                  Rolled up from project Time custom fields
-                </p>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-bcb-border text-[11px] uppercase tracking-wider text-stone-400">
+                      <th className="py-2.5 pr-4">Project</th>
+                      <th className="py-2.5 px-4 w-32">Actual Time</th>
+                      <th className="py-2.5 px-4 w-32">Estimate Time</th>
+                      <th className="py-2.5 pl-4 min-w-[240px]">Actual / Estimate</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-bcb-border">
+                    {data.projects.map((proj) => {
+                      const pTasks = data.tasks.filter((t) => t.project_id === proj.id);
+                      const pFields = data.customFields.filter((f) => f.project_id === proj.id);
+                      let projEst = 0;
+                      let projActual = 0;
+
+                      for (const t of pTasks) {
+                        for (const f of pFields) {
+                          const val = Number(t.field_values[f.id] || 0);
+                          if (!isNaN(val)) {
+                            if (f.name.toLowerCase().includes("estimated")) projEst += val;
+                            if (f.name.toLowerCase().includes("actual")) projActual += val;
+                          }
+                        }
+                      }
+
+                      const ratio = projEst > 0 ? (projActual / projEst) * 100 : projActual > 0 ? 100 : 0;
+                      const barWidth = Math.min(100, Math.round(ratio));
+                      const isOver = projEst > 0 && projActual > projEst;
+
+                      return (
+                        <tr
+                          key={proj.id}
+                          onClick={() => setActiveView(proj.id)}
+                          className="hover:bg-bcb-surface/70 cursor-pointer transition"
+                        >
+                          <td className="py-3 pr-4 font-medium text-white">{proj.name}</td>
+                          <td className="py-3 px-4 text-stone-200 font-semibold">{projActual.toFixed(2)}h</td>
+                          <td className="py-3 px-4 text-bcb-tea font-semibold">{projEst.toFixed(2)}h</td>
+                          <td className="py-3 pl-4">
+                            <div className="flex items-center gap-3">
+                              <div className="flex-1 h-2.5 rounded-full bg-bcb-canvas overflow-hidden border border-bcb-border/60">
+                                <div
+                                  className={`h-full transition-all ${
+                                    isOver ? "bg-[#E06C75]" : "bg-bcb-cerulean"
+                                  }`}
+                                  style={{ width: `${barWidth}%` }}
+                                />
+                              </div>
+                              <span
+                                className={`text-xs font-semibold w-12 text-right ${
+                                  isOver ? "text-[#E06C75]" : "text-bcb-tea"
+                                }`}
+                              >
+                                {Math.round(ratio)}%
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
 

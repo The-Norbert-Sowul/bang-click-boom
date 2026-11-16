@@ -468,6 +468,50 @@ function applyMigrationsAndCleanup(db: DatabaseSync) {
       now
     );
   }
+
+  // 5. Mark feat-task-2 complete and ensure new Todo-Later items (feat-task-9, feat-task-10) exist
+  const prioFieldId = `fld-${featureProjId}-priority`;
+  const estFieldId = `fld-${featureProjId}-est`;
+  const actFieldId = `fld-${featureProjId}-actual`;
+
+  db.prepare(
+    "UPDATE tasks SET completed = 1, section_id = 'sec-feat-done', title = 'Project Time Breakdown widget (Actual vs. Estimated per project)' WHERE id = 'feat-task-2' AND completed = 0"
+  ).run();
+
+  const extraFeatureTasks = [
+    {
+      id: "feat-task-9",
+      title: "Prevent negative numbers in Time Custom Fields (Est. & Actual Time)",
+      description: "Add input validation so negative hours cannot be entered in Estimated Time or Actual Time.",
+      priority: "Medium",
+      est: 0.5,
+    },
+    {
+      id: "feat-task-10",
+      title: "Task Completion Progress Bar with Blocking Tasks support",
+      description: "Enhance the Task Completion progress bar to distinguish between actionable tasks, tasks blocked by 'Blocking Tasks', and completed tasks.",
+      priority: "High",
+      est: 2.5,
+    },
+  ];
+
+  for (const eft of extraFeatureTasks) {
+    const exists = db.prepare("SELECT id FROM tasks WHERE id = ?").get(eft.id);
+    if (!exists) {
+      db.prepare(`
+        INSERT INTO tasks (id, project_id, section_id, title, description, completed, assignee, due_date, created_at, updated_at, updated_by)
+        VALUES (?, ?, 'sec-feat-todo', ?, ?, 0, 'Gemini', NULL, ?, ?, 'Gemini')
+      `).run(eft.id, featureProjId, eft.title, eft.description, now, now);
+
+      const upsertVal = db.prepare(`
+        INSERT OR REPLACE INTO task_field_values (task_id, field_id, value_text, value_number)
+        VALUES (?, ?, ?, ?)
+      `);
+      upsertVal.run(eft.id, prioFieldId, eft.priority, null);
+      upsertVal.run(eft.id, estFieldId, null, eft.est);
+      upsertVal.run(eft.id, actFieldId, null, 0);
+    }
+  }
 }
 
 export function getFullWorkspaceData() {
