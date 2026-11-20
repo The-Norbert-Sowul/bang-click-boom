@@ -1,6 +1,104 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, getFullWorkspaceData, createSnapshotBackup } from "@/lib/db";
+import { formatDurationCompact } from "@/lib/timeUtils";
+import { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
+
+function isCompletionSectionName(name: string): boolean {
+  return ["completed", "done", "complete"].includes(name.trim().toLowerCase());
+}
+
+function accumulateRunningTimer(db: DatabaseSync, existingTask: any, now: string) {
+  if (!existingTask.timer_started_at) return null;
+
+  const startMs = new Date(existingTask.timer_started_at).getTime();
+  const nowMs = new Date(now).getTime();
+  const elapsedMs = Number.isNaN(startMs) ? 0 : Math.max(0, nowMs - startMs);
+  const elapsedSeconds = Math.floor(elapsedMs / 1000);
+  const elapsedHours = elapsedMs / 3600000;
+
+  let actualField = db
+    .prepare(
+      "SELECT id FROM custom_field_defs WHERE project_id = ? AND field_type = 'time_hours' AND LOWER(name) LIKE '%actual%' ORDER BY sort_order ASC LIMIT 1"
+    )
+    .get(existingTask.project_id) as { id: string } | undefined;
+
+  if (!actualField) {
+    actualField = db
+      .prepare(
+        "SELECT id FROM custom_field_defs WHERE project_id = ? AND LOWER(name) LIKE '%actual%' ORDER BY sort_order ASC LIMIT 1"
+      )
+      .get(existingTask.project_id) as { id: string } | undefined;
+  }
+
+  let newActualHours = Math.round(elapsedHours * 10000) / 10000;
+
+  if (actualField) {
+    const currentRow = db
+      .prepare("SELECT value_number, value_text FROM task_field_values WHERE task_id = ? AND field_id = ?")
+      .get(existingTask.id, actualField.id) as
+      | { value_number: number | null; value_text: string | null }
+      | undefined;
+
+    const currentVal =
+      currentRow?.value_number !== null && currentRow?.value_number !== undefined
+        ? Number(currentRow.value_number)
+        : Number(currentRow?.value_text || 0) || 0;
+
+    newActualHours = Math.round((currentVal + elapsedHours) * 10000) / 10000;
+
+    db.prepare(
+      "INSERT OR REPLACE INTO task_field_values (task_id, field_id, value_text, value_number) VALUES (?, ?, NULL, ?)"
+    ).run(existingTask.id, actualField.id, newActualHours);
+  }
+
+  return {
+    elapsedSeconds,
+    addedHours: Math.round(elapsedHours * 10000) / 10000,
+    newActualHours,
+  };
+}
+
+function findOrCreateInProgressSection(db: DatabaseSync, projectId: string): { id: string; name: string } {
+  const existing = db
+    .prepare(
+      "SELECT id, name FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('in progress', 'in-progress', 'doing') ORDER BY sort_order ASC LIMIT 1"
+    )
+    .get(projectId) as { id: string; name: string } | undefined;
+
+  if (existing) return existing;
+
+  const doneSec = db
+    .prepare(
+      "SELECT id, sort_order FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('completed', 'done', 'complete') ORDER BY sort_order ASC LIMIT 1"
+    )
+    .get(projectId) as { id: string; sort_order: number } | undefined;
+
+  const newId = `sec-${crypto.randomUUID().slice(0, 8)}`;
+
+  if (doneSec) {
+    db.prepare("UPDATE sections SET sort_order = sort_order + 1 WHERE project_id = ? AND sort_order >= ?").run(
+      projectId,
+      doneSec.sort_order
+    );
+    db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'In Progress', ?)").run(
+      newId,
+      projectId,
+      doneSec.sort_order
+    );
+  } else {
+    const maxRow = db
+      .prepare("SELECT COALESCE(MAX(sort_order), 0) as max_order FROM sections WHERE project_id = ?")
+      .get(projectId) as { max_order: number };
+    db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'In Progress', ?)").run(
+      newId,
+      projectId,
+      maxRow.max_order + 1
+    );
+  }
+
+  return { id: newId, name: "In Progress" };
+}
 
 export async function GET() {
   try {
@@ -66,6 +164,12 @@ export async function POST(req: NextRequest) {
       const newCompletedAt =
         completed !== undefined ? (newCompleted === 1 ? now : null) : existing.completed_at;
 
+      let newTimerStartedAt: string | null = existing.timer_started_at ?? null;
+      if (completed !== undefined && newCompleted === 1 && existing.timer_started_at) {
+        accumulateRunningTimer(db, existing, now);
+        newTimerStartedAt = null;
+      }
+
       // Automatically move task to "Completed"/"Done" section when marked complete,
       // or back to the first section ("To Do") when reopened if no explicit section_id was passed
       let newSectionId = section_id !== undefined ? section_id : existing.section_id;
@@ -87,9 +191,21 @@ export async function POST(req: NextRequest) {
 
       db.prepare(`
         UPDATE tasks
-        SET title = ?, description = ?, completed = ?, assignee = ?, due_date = ?, section_id = ?, updated_at = ?, completed_at = ?, updated_by = ?
+        SET title = ?, description = ?, completed = ?, assignee = ?, due_date = ?, section_id = ?, updated_at = ?, completed_at = ?, timer_started_at = ?, updated_by = ?
         WHERE id = ?
-      `).run(newTitle, newDesc, newCompleted, newAssignee, newDueDate, newSectionId, now, newCompletedAt, actor, id);
+      `).run(
+        newTitle,
+        newDesc,
+        newCompleted,
+        newAssignee,
+        newDueDate,
+        newSectionId,
+        now,
+        newCompletedAt,
+        newTimerStartedAt,
+        actor,
+        id
+      );
 
       if (field_values && typeof field_values === "object") {
         const upsertVal = db.prepare(`
@@ -119,6 +235,120 @@ export async function POST(req: NextRequest) {
         actor,
         actionDesc,
         newTitle,
+        now
+      );
+
+      return NextResponse.json(getFullWorkspaceData());
+    }
+
+    if (body.action === "start_timer") {
+      const { id } = body;
+      const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as any;
+      if (!existing) {
+        return NextResponse.json({ error: "Task not found" }, { status: 404 });
+      }
+      if (existing.timer_started_at) {
+        return NextResponse.json(getFullWorkspaceData());
+      }
+
+      const inProgressSec = findOrCreateInProgressSection(db, existing.project_id);
+      const moved = existing.section_id !== inProgressSec.id;
+
+      db.prepare(`
+        UPDATE tasks
+        SET timer_started_at = ?, section_id = ?, completed = 0, completed_at = NULL, updated_at = ?, updated_by = ?
+        WHERE id = ?
+      `).run(now, inProgressSec.id, now, actor, id);
+
+      db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+        crypto.randomUUID(),
+        actor,
+        moved ? `Started timer & moved to "${inProgressSec.name}"` : "Started timer",
+        existing.title,
+        now
+      );
+
+      return NextResponse.json({
+        movedToSection: moved ? inProgressSec.name : null,
+        ...getFullWorkspaceData(),
+      });
+    }
+
+    if (body.action === "stop_timer") {
+      const { id } = body;
+      const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as any;
+      if (!existing) {
+        return NextResponse.json({ error: "Task not found" }, { status: 404 });
+      }
+      if (!existing.timer_started_at) {
+        return NextResponse.json(getFullWorkspaceData());
+      }
+
+      const summary = accumulateRunningTimer(db, existing, now);
+
+      db.prepare("UPDATE tasks SET timer_started_at = NULL, updated_at = ?, updated_by = ? WHERE id = ?").run(
+        now,
+        actor,
+        id
+      );
+
+      const compactDuration = summary ? formatDurationCompact(summary.elapsedSeconds) : "0s";
+      db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+        crypto.randomUUID(),
+        actor,
+        `Stopped timer (+${compactDuration})`,
+        existing.title,
+        now
+      );
+
+      return NextResponse.json({
+        timerSummary: summary,
+        ...getFullWorkspaceData(),
+      });
+    }
+
+    if (body.action === "move_task_section") {
+      const { id, section_id } = body;
+      const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as any;
+      if (!existing) {
+        return NextResponse.json({ error: "Task not found" }, { status: 404 });
+      }
+
+      const targetSec = db.prepare("SELECT id, project_id, name FROM sections WHERE id = ?").get(section_id) as
+        | { id: string; project_id: string; name: string }
+        | undefined;
+      if (!targetSec || targetSec.project_id !== existing.project_id) {
+        return NextResponse.json({ error: "Target section not found in task's project" }, { status: 404 });
+      }
+
+      const isTargetDone = isCompletionSectionName(targetSec.name);
+      let newCompleted = existing.completed;
+      let newCompletedAt = existing.completed_at;
+      let newTimerStartedAt: string | null = existing.timer_started_at ?? null;
+
+      if (isTargetDone) {
+        newCompleted = 1;
+        newCompletedAt = existing.completed ? existing.completed_at || now : now;
+        if (existing.timer_started_at) {
+          accumulateRunningTimer(db, existing, now);
+          newTimerStartedAt = null;
+        }
+      } else if (existing.completed === 1) {
+        newCompleted = 0;
+        newCompletedAt = null;
+      }
+
+      db.prepare(`
+        UPDATE tasks
+        SET section_id = ?, completed = ?, completed_at = ?, timer_started_at = ?, updated_at = ?, updated_by = ?
+        WHERE id = ?
+      `).run(targetSec.id, newCompleted, newCompletedAt, newTimerStartedAt, now, actor, id);
+
+      db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+        crypto.randomUUID(),
+        actor,
+        `Moved to "${targetSec.name}"`,
+        existing.title,
         now
       );
 

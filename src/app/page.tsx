@@ -24,8 +24,20 @@ import {
   Archive,
   ArchiveRestore,
   Calendar,
+  Play,
+  Square,
+  GripVertical,
 } from "lucide-react";
 import BurnupChart from "@/components/BurnupChart";
+import InlineFieldInput from "@/components/InlineFieldInput";
+import TaskDetailDrawer from "@/components/TaskDetailDrawer";
+import {
+  isActualTimeField,
+  getElapsedSeconds,
+  formatDurationHMS,
+  formatDurationCompact,
+  formatHoursForInput,
+} from "@/lib/timeUtils";
 
 interface Portfolio {
   id: string;
@@ -73,6 +85,7 @@ interface Task {
   created_at: string;
   updated_at: string;
   completed_at?: string | null;
+  timer_started_at?: string | null;
   updated_by: "You" | "Gemini";
   field_values: Record<string, string | number | null>;
 }
@@ -98,9 +111,14 @@ export default function BangClickBoomApp() {
   const [data, setData] = useState<WorkspaceData | null>(null);
   const [activeView, setActiveView] = useState<"dashboard" | "portfolio" | string>("proj-bcb");
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showCustomizeModal, setShowCustomizeModal] = useState(false);
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
+
+  // Live timer clock & Drag-and-drop state
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [dragOverSectionId, setDragOverSectionId] = useState<string | null>(null);
 
   // Quick-add task state per section
   const [newTaskTitle, setNewTaskTitle] = useState<Record<string, string>>({});
@@ -129,10 +147,6 @@ export default function BangClickBoomApp() {
     if (res.ok) {
       const json = await res.json();
       setData(json);
-      if (selectedTask) {
-        const updated = json.tasks.find((t: Task) => t.id === selectedTask.id);
-        setSelectedTask(updated || null);
-      }
     }
   }
 
@@ -141,6 +155,17 @@ export default function BangClickBoomApp() {
     const interval = setInterval(fetchWorkspace, 4000);
     return () => clearInterval(interval);
   }, []);
+
+  const hasRunningTimer = Boolean(data?.tasks.some((t) => Boolean(t.timer_started_at)));
+
+  useEffect(() => {
+    if (!hasRunningTimer) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [hasRunningTimer]);
+
+  const selectedTask = data?.tasks.find((t) => t.id === selectedTaskId) || null;
 
   async function apiAction(payload: Record<string, any>) {
     const res = await fetch("/api/bcb", {
@@ -151,10 +176,6 @@ export default function BangClickBoomApp() {
     if (res.ok) {
       const json = await res.json();
       setData(json);
-      if (selectedTask) {
-        const updated = json.tasks.find((t: Task) => t.id === selectedTask.id);
-        setSelectedTask(updated || null);
-      }
       return json;
     }
   }
@@ -221,6 +242,34 @@ export default function BangClickBoomApp() {
       title,
       assignee,
     });
+  }
+
+  async function handleStartTimer(task: Task) {
+    const res = await apiAction({ action: "start_timer", id: task.id });
+    if (res?.movedToSection) {
+      triggerToast(`Timer started — moved "${task.title}" to ${res.movedToSection}`);
+    } else if (res) {
+      triggerToast(`Timer started for "${task.title}"`);
+    }
+  }
+
+  async function handleStopTimer(task: Task) {
+    const res = await apiAction({ action: "stop_timer", id: task.id });
+    if (res?.timerSummary) {
+      triggerToast(
+        `Timer stopped — logged +${formatDurationCompact(res.timerSummary.elapsedSeconds)} to Actual Time`
+      );
+    }
+  }
+
+  async function handleMoveTaskToSection(task: Task, targetSection: Section) {
+    if (task.section_id === targetSection.id) return;
+    await apiAction({
+      action: "move_task_section",
+      id: task.id,
+      section_id: targetSection.id,
+    });
+    triggerToast(`Moved "${task.title}" to ${targetSection.name}`);
   }
 
   async function handleAddCustomField(e: React.FormEvent) {
@@ -921,7 +970,7 @@ export default function BangClickBoomApp() {
                       <th className="py-3 px-3 w-36">Assigned To</th>
                       <th className="py-3 px-3 w-36">Due Date</th>
                       {visibleProjectFields.map((field) => (
-                        <th key={field.id} className="py-3 px-3 w-36">
+                        <th key={field.id} className={`py-3 px-3 ${isActualTimeField(field) ? "w-44" : "w-36"}`}>
                           <div className="flex items-center gap-1.5 text-bcb-tea">
                             <span>{field.name}</span>
                           </div>
@@ -939,227 +988,370 @@ export default function BangClickBoomApp() {
                     </tr>
                   </thead>
 
-                  <tbody className="divide-y divide-bcb-border">
+                  <tbody
+                    className="divide-y divide-bcb-border"
+                    onDragLeave={(e) => {
+                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                        setDragOverSectionId(null);
+                      }
+                    }}
+                  >
                     {projectSections.map((section) => {
                       const sectionTasks = data.tasks.filter(
                         (t) => t.project_id === activeProject.id && t.section_id === section.id
                       );
                       const isCollapsed = !!collapsedSections[section.id];
+                      const draggedTask = draggedTaskId
+                        ? data.tasks.find((t) => t.id === draggedTaskId)
+                        : null;
+                      const isDropTarget = Boolean(
+                        draggedTask &&
+                          dragOverSectionId === section.id &&
+                          draggedTask.section_id !== section.id
+                      );
+
+                      const handleSectionDragOver = (e: React.DragEvent) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        if (dragOverSectionId !== section.id) {
+                          setDragOverSectionId(section.id);
+                        }
+                      };
+
+                      const handleSectionDrop = (e: React.DragEvent) => {
+                        e.preventDefault();
+                        const taskId = draggedTaskId || e.dataTransfer.getData("text/plain");
+                        setDraggedTaskId(null);
+                        setDragOverSectionId(null);
+                        if (!taskId) return;
+                        const droppedTask = data.tasks.find((t) => t.id === taskId);
+                        if (droppedTask && droppedTask.section_id !== section.id) {
+                          handleMoveTaskToSection(droppedTask, section);
+                        }
+                      };
 
                       return (
                         <React.Fragment key={section.id}>
                           {/* Section Header Row */}
-                          <tr className="bg-bcb-canvas/70">
+                          <tr
+                            onDragOver={handleSectionDragOver}
+                            onDrop={handleSectionDrop}
+                            className={`transition ${
+                              isDropTarget
+                                ? "bg-bcb-cerulean/25 ring-1 ring-inset ring-bcb-cerulean"
+                                : "bg-bcb-canvas/70"
+                            }`}
+                          >
                             <td
                               colSpan={4 + visibleProjectFields.length}
                               className="py-2.5 px-4 font-bold text-xs uppercase tracking-wider text-bcb-tea"
                             >
-                              <button
-                                onClick={() =>
-                                  setCollapsedSections({
-                                    ...collapsedSections,
-                                    [section.id]: !isCollapsed,
-                                  })
-                                }
-                                className="flex items-center gap-2 hover:text-white transition"
-                              >
-                                {isCollapsed ? (
-                                  <ChevronRight className="w-4 h-4" />
-                                ) : (
-                                  <ChevronDown className="w-4 h-4" />
+                              <div className="flex items-center justify-between">
+                                <button
+                                  onClick={() =>
+                                    setCollapsedSections({
+                                      ...collapsedSections,
+                                      [section.id]: !isCollapsed,
+                                    })
+                                  }
+                                  className="flex items-center gap-2 hover:text-white transition"
+                                >
+                                  {isCollapsed ? (
+                                    <ChevronRight className="w-4 h-4" />
+                                  ) : (
+                                    <ChevronDown className="w-4 h-4" />
+                                  )}
+                                  <span>{section.name}</span>
+                                  <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-bcb-surface text-stone-300">
+                                    {sectionTasks.length}
+                                  </span>
+                                </button>
+                                {isDropTarget && (
+                                  <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded bg-bcb-cerulean text-white">
+                                    Drop to move here
+                                  </span>
                                 )}
-                                <span>{section.name}</span>
-                                <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-bcb-surface text-stone-300">
-                                  {sectionTasks.length}
-                                </span>
-                              </button>
+                              </div>
                             </td>
                           </tr>
 
                           {/* Tasks in Section */}
                           {!isCollapsed &&
-                            sectionTasks.map((task) => (
-                              <tr
-                                key={task.id}
-                                className={`group hover:bg-bcb-surface/80 transition ${
-                                  selectedTask?.id === task.id ? "bg-bcb-surface" : ""
-                                }`}
-                              >
-                                {/* Task Title + Complete Toggle */}
-                                <td className="py-2.5 px-4">
-                                  <div className="flex items-center gap-3">
-                                    <button
-                                      onClick={() =>
-                                        apiAction({
-                                          action: "update_task",
-                                          id: task.id,
-                                          completed: task.completed === 0,
-                                        })
-                                      }
-                                      className="shrink-0"
-                                    >
-                                      {task.completed ? (
-                                        <CheckCircle2 className="w-5 h-5 text-bcb-tea" />
-                                      ) : (
-                                        <Circle className="w-5 h-5 text-stone-400 hover:text-bcb-cerulean-light" />
-                                      )}
-                                    </button>
-                                    <button
-                                      onClick={() => setSelectedTask(task)}
-                                      className={`text-left font-medium hover:underline truncate ${
-                                        task.completed ? "line-through text-stone-500" : "text-stone-100"
-                                      }`}
-                                    >
-                                      {task.title}
-                                    </button>
-                                  </div>
-                                </td>
+                            sectionTasks.map((task) => {
+                              const isTimerRunning = Boolean(task.timer_started_at);
+                              const liveElapsedSec = getElapsedSeconds(task.timer_started_at, nowMs);
 
-                                {/* Assigned To Dropdown */}
-                                <td className="py-2 px-3">
-                                  <select
-                                    value={task.assignee}
-                                    onChange={(e) =>
-                                      apiAction({
-                                        action: "update_task",
-                                        id: task.id,
-                                        assignee: e.target.value,
-                                      })
+                              return (
+                                <tr
+                                  key={task.id}
+                                  draggable
+                                  onDragStart={(e) => {
+                                    if ((e.target as HTMLElement)?.closest("input, select, textarea, label")) {
+                                      e.preventDefault();
+                                      return;
                                     }
-                                    className={`text-xs font-semibold px-2.5 py-1 rounded-full border cursor-pointer focus:outline-none ${
-                                      task.assignee === "Gemini"
-                                        ? "bg-bcb-cerulean text-white border-bcb-cerulean-light"
-                                        : "bg-bcb-canvas text-bcb-tea border-bcb-border"
-                                    }`}
-                                  >
-                                    <option value="You">👤 You</option>
-                                    <option value="Gemini">✨ Gemini</option>
-                                    <option value="Unassigned">Unassigned</option>
-                                  </select>
-                                </td>
+                                    setDraggedTaskId(task.id);
+                                    e.dataTransfer.effectAllowed = "move";
+                                    e.dataTransfer.setData("text/plain", task.id);
+                                  }}
+                                  onDragEnd={() => {
+                                    setDraggedTaskId(null);
+                                    setDragOverSectionId(null);
+                                  }}
+                                  onDragOver={handleSectionDragOver}
+                                  onDrop={handleSectionDrop}
+                                  className={`group hover:bg-bcb-surface/80 transition ${
+                                    selectedTask?.id === task.id ? "bg-bcb-surface" : ""
+                                  } ${isDropTarget ? "bg-bcb-cerulean/5" : ""} ${
+                                    draggedTaskId === task.id ? "opacity-40" : ""
+                                  }`}
+                                >
+                                  {/* Task Title + Drag Handle + Complete Toggle */}
+                                  <td className="py-2.5 px-4">
+                                    <div className="flex items-center gap-2.5">
+                                      <GripVertical
+                                        className="w-4 h-4 shrink-0 text-stone-600 group-hover:text-stone-400 cursor-grab active:cursor-grabbing"
+                                        aria-hidden="true"
+                                      />
+                                      <button
+                                        onClick={() =>
+                                          apiAction({
+                                            action: "update_task",
+                                            id: task.id,
+                                            completed: task.completed === 0,
+                                          })
+                                        }
+                                        className="shrink-0"
+                                      >
+                                        {task.completed ? (
+                                          <CheckCircle2 className="w-5 h-5 text-bcb-tea" />
+                                        ) : (
+                                          <Circle className="w-5 h-5 text-stone-400 hover:text-bcb-cerulean-light" />
+                                        )}
+                                      </button>
+                                      <button
+                                        onClick={() => setSelectedTaskId(task.id)}
+                                        className={`text-left font-medium hover:underline truncate ${
+                                          task.completed ? "line-through text-stone-500" : "text-stone-100"
+                                        }`}
+                                      >
+                                        {task.title}
+                                      </button>
+                                    </div>
+                                  </td>
 
-                                {/* Due Date Pill (Blank space + Calendar icon when empty) */}
-                                <td className="py-2 px-3">
-                                  <label className="relative inline-flex items-center justify-between w-28 px-2.5 py-1 rounded-full border border-bcb-border bg-bcb-canvas hover:border-bcb-cerulean text-xs cursor-pointer transition">
-                                    <span className={task.due_date ? "text-stone-200 font-medium" : "text-transparent select-none"}>
-                                      {task.due_date
-                                        ? `${task.due_date.slice(5, 7)}/${task.due_date.slice(8, 10)}/${task.due_date.slice(2, 4)}`
-                                        : "\u00A0"}
-                                    </span>
-                                    <Calendar className={`w-3.5 h-3.5 shrink-0 ${task.due_date ? "text-bcb-tea" : "text-stone-400"}`} />
-                                    <input
-                                      type="date"
-                                      value={task.due_date || ""}
-                                      onClick={(e) => {
-                                        try {
-                                          (e.currentTarget as HTMLInputElement).showPicker?.();
-                                        } catch {}
-                                      }}
+                                  {/* Assigned To Dropdown */}
+                                  <td className="py-2 px-3">
+                                    <select
+                                      value={task.assignee}
                                       onChange={(e) =>
                                         apiAction({
                                           action: "update_task",
                                           id: task.id,
-                                          due_date: e.target.value || null,
+                                          assignee: e.target.value,
                                         })
                                       }
-                                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                                    />
-                                  </label>
-                                </td>
+                                      className={`text-xs font-semibold px-2.5 py-1 rounded-full border cursor-pointer focus:outline-none ${
+                                        task.assignee === "Gemini"
+                                          ? "bg-bcb-cerulean text-white border-bcb-cerulean-light"
+                                          : "bg-bcb-canvas text-bcb-tea border-bcb-border"
+                                      }`}
+                                    >
+                                      <option value="You">👤 You</option>
+                                      <option value="Gemini">✨ Gemini</option>
+                                      <option value="Unassigned">Unassigned</option>
+                                    </select>
+                                  </td>
 
-                                {/* Dynamic Custom Task Fields */}
-                                {visibleProjectFields.map((field) => {
-                                  const rawVal = task.field_values[field.id] ?? "";
-                                  if (field.field_type === "single_select") {
-                                    let opts: { label: string; color: string }[] = [];
-                                    try {
-                                      opts = JSON.parse(field.options_json || "[]");
-                                    } catch {}
-                                    const activeOpt = opts.find((o) => o.label === rawVal);
+                                  {/* Due Date Pill (Blank space + Calendar icon when empty) */}
+                                  <td className="py-2 px-3">
+                                    <label className="relative inline-flex items-center justify-between w-28 px-2.5 py-1 rounded-full border border-bcb-border bg-bcb-canvas hover:border-bcb-cerulean text-xs cursor-pointer transition">
+                                      <span className={task.due_date ? "text-stone-200 font-medium" : "text-transparent select-none"}>
+                                        {task.due_date
+                                          ? `${task.due_date.slice(5, 7)}/${task.due_date.slice(8, 10)}/${task.due_date.slice(2, 4)}`
+                                          : "\u00A0"}
+                                      </span>
+                                      <Calendar className={`w-3.5 h-3.5 shrink-0 ${task.due_date ? "text-bcb-tea" : "text-stone-400"}`} />
+                                      <input
+                                        type="date"
+                                        value={task.due_date || ""}
+                                        onClick={(e) => {
+                                          try {
+                                            (e.currentTarget as HTMLInputElement).showPicker?.();
+                                          } catch {}
+                                        }}
+                                        onChange={(e) =>
+                                          apiAction({
+                                            action: "update_task",
+                                            id: task.id,
+                                            due_date: e.target.value || null,
+                                          })
+                                        }
+                                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                      />
+                                    </label>
+                                  </td>
+
+                                  {/* Dynamic Custom Task Fields */}
+                                  {visibleProjectFields.map((field) => {
+                                    const rawVal = task.field_values[field.id] ?? "";
+                                    if (field.field_type === "single_select") {
+                                      let opts: { label: string; color: string }[] = [];
+                                      try {
+                                        opts = JSON.parse(field.options_json || "[]");
+                                      } catch {}
+                                      const activeOpt = opts.find((o) => o.label === rawVal);
+
+                                      return (
+                                        <td key={field.id} className="py-2 px-3">
+                                          <select
+                                            value={String(rawVal)}
+                                            onChange={(e) =>
+                                              apiAction({
+                                                action: "update_task",
+                                                id: task.id,
+                                                field_values: { [field.id]: e.target.value },
+                                              })
+                                            }
+                                            style={{
+                                              backgroundColor: activeOpt ? `${activeOpt.color}25` : "#1A1312",
+                                              color: activeOpt ? activeOpt.color : "#C4D6B0",
+                                              borderColor: activeOpt ? activeOpt.color : "#463634",
+                                            }}
+                                            className="text-xs font-semibold px-2.5 py-1 rounded-full border cursor-pointer focus:outline-none"
+                                          >
+                                            <option value="">—</option>
+                                            {opts.map((o) => (
+                                              <option key={o.label} value={o.label} className="bg-bcb-coffee text-white">
+                                                {o.label}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </td>
+                                      );
+                                    }
+
+                                    if (isActualTimeField(field)) {
+                                      const storedHours = Number(rawVal || 0) || 0;
+                                      const liveTotalSec = Math.round(storedHours * 3600) + liveElapsedSec;
+
+                                      return (
+                                        <td key={field.id} className="py-2 px-3">
+                                          {isTimerRunning ? (
+                                            <div className="flex items-center gap-2">
+                                              <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  handleStopTimer(task);
+                                                }}
+                                                title="Stop timer & log elapsed time"
+                                                className="p-1.5 rounded-md bg-red-500/20 text-red-300 border border-red-500/50 hover:bg-red-500 hover:text-white transition animate-pulse"
+                                              >
+                                                <Square className="w-3 h-3 fill-current" />
+                                              </button>
+                                              <span className="px-2 py-0.5 rounded bg-bcb-canvas border border-bcb-cerulean/60 text-bcb-tea font-mono text-xs font-semibold">
+                                                {formatDurationHMS(liveTotalSec)}
+                                              </span>
+                                            </div>
+                                          ) : (
+                                            <div className="flex items-center gap-1.5">
+                                              <InlineFieldInput
+                                                value={rawVal}
+                                                isNumeric
+                                                step="0.25"
+                                                min="0"
+                                                placeholder="—"
+                                                formatDisplay={formatHoursForInput}
+                                                onCommit={(nextVal) =>
+                                                  apiAction({
+                                                    action: "update_task",
+                                                    id: task.id,
+                                                    is_numeric_field: true,
+                                                    field_values: { [field.id]: nextVal },
+                                                  })
+                                                }
+                                                className="w-16 bg-transparent border border-transparent hover:border-bcb-border focus:border-bcb-cerulean rounded px-1.5 py-1 text-xs text-stone-200 focus:outline-none"
+                                              />
+                                              <span className="text-[11px] text-stone-400">h</span>
+                                              <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  handleStartTimer(task);
+                                                }}
+                                                title="Start timer (moves to In Progress)"
+                                                className="p-1.5 rounded-md bg-bcb-canvas border border-bcb-border text-bcb-cerulean-light hover:bg-bcb-cerulean hover:text-white hover:border-bcb-cerulean transition"
+                                              >
+                                                <Play className="w-3 h-3 fill-current" />
+                                              </button>
+                                            </div>
+                                          )}
+                                        </td>
+                                      );
+                                    }
+
+                                    const isNumeric =
+                                      field.field_type === "time_hours" ||
+                                      field.field_type === "number" ||
+                                      field.field_type === "percent";
 
                                     return (
                                       <td key={field.id} className="py-2 px-3">
-                                        <select
-                                          value={String(rawVal)}
-                                          onChange={(e) =>
-                                            apiAction({
-                                              action: "update_task",
-                                              id: task.id,
-                                              field_values: { [field.id]: e.target.value },
-                                            })
-                                          }
-                                          style={{
-                                            backgroundColor: activeOpt ? `${activeOpt.color}25` : "#1A1312",
-                                            color: activeOpt ? activeOpt.color : "#C4D6B0",
-                                            borderColor: activeOpt ? activeOpt.color : "#463634",
-                                          }}
-                                          className="text-xs font-semibold px-2.5 py-1 rounded-full border cursor-pointer focus:outline-none"
-                                        >
-                                          <option value="">—</option>
-                                          {opts.map((o) => (
-                                            <option key={o.label} value={o.label} className="bg-bcb-coffee text-white">
-                                              {o.label}
-                                            </option>
-                                          ))}
-                                        </select>
-                                      </td>
-                                    );
-                                  }
-
-                                  const isNumeric =
-                                    field.field_type === "time_hours" ||
-                                    field.field_type === "number" ||
-                                    field.field_type === "percent";
-
-                                  return (
-                                    <td key={field.id} className="py-2 px-3">
-                                      <div className="flex items-center gap-1">
-                                        <input
-                                          type={isNumeric ? "number" : "text"}
-                                          step={isNumeric ? "0.25" : undefined}
-                                          defaultValue={rawVal}
-                                          placeholder="—"
-                                          onBlur={(e) => {
-                                            if (String(e.target.value) !== String(rawVal)) {
+                                        <div className="flex items-center gap-1">
+                                          <InlineFieldInput
+                                            value={rawVal}
+                                            isNumeric={isNumeric}
+                                            step={isNumeric ? "0.25" : undefined}
+                                            min={field.field_type === "time_hours" ? "0" : undefined}
+                                            placeholder="—"
+                                            formatDisplay={
+                                              field.field_type === "time_hours" ? formatHoursForInput : undefined
+                                            }
+                                            onCommit={(nextVal) =>
                                               apiAction({
                                                 action: "update_task",
                                                 id: task.id,
                                                 is_numeric_field: isNumeric,
-                                                field_values: {
-                                                  [field.id]: e.target.value,
-                                                },
-                                              });
+                                                field_values: { [field.id]: nextVal },
+                                              })
                                             }
-                                          }}
-                                          className="w-20 bg-transparent border border-transparent hover:border-bcb-border focus:border-bcb-cerulean rounded px-1.5 py-1 text-xs text-stone-200 focus:outline-none"
-                                        />
-                                        {field.field_type === "time_hours" && (
-                                          <span className="text-[11px] text-stone-400">h</span>
-                                        )}
-                                        {field.field_type === "percent" && (
-                                          <span className="text-[11px] text-stone-400">%</span>
-                                        )}
-                                      </div>
-                                    </td>
-                                  );
-                                })}
+                                            className="w-20 bg-transparent border border-transparent hover:border-bcb-border focus:border-bcb-cerulean rounded px-1.5 py-1 text-xs text-stone-200 focus:outline-none"
+                                          />
+                                          {field.field_type === "time_hours" && (
+                                            <span className="text-[11px] text-stone-400">h</span>
+                                          )}
+                                          {field.field_type === "percent" && (
+                                            <span className="text-[11px] text-stone-400">%</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                    );
+                                  })}
 
-                                {/* Delete Action */}
-                                <td className="py-2 px-3 text-right">
-                                  <button
-                                    onClick={() => apiAction({ action: "delete_task", id: task.id })}
-                                    className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-950/60 text-stone-400 hover:text-red-400 transition"
-                                    title="Delete task"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
+                                  {/* Delete Action */}
+                                  <td className="py-2 px-3 text-right">
+                                    <button
+                                      onClick={() => apiAction({ action: "delete_task", id: task.id })}
+                                      className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-950/60 text-stone-400 hover:text-red-400 transition"
+                                      title="Delete task"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
 
                           {/* Quick Add Task Row */}
                           {!isCollapsed && (
-                            <tr className="bg-bcb-coffee/40">
+                            <tr
+                              onDragOver={handleSectionDragOver}
+                              onDrop={handleSectionDrop}
+                              className={`transition ${
+                                isDropTarget ? "bg-bcb-cerulean/10" : "bg-bcb-coffee/40"
+                              }`}
+                            >
                               <td colSpan={4 + visibleProjectFields.length} className="py-2 px-4">
                                 <div className="flex items-center gap-3">
                                   <Plus className="w-4 h-4 text-stone-400" />
@@ -1215,127 +1407,20 @@ export default function BangClickBoomApp() {
 
       {/* Slide-Over Task Detail Drawer */}
       {selectedTask && (
-        <aside className="w-96 bg-bcb-coffee border-l border-bcb-border p-6 flex flex-col justify-between shrink-0 shadow-2xl">
-          <div className="space-y-5">
-            <div className="flex items-center justify-between border-b border-bcb-border pb-4">
-              <button
-                onClick={() =>
-                  apiAction({
-                    action: "update_task",
-                    id: selectedTask.id,
-                    completed: selectedTask.completed === 0,
-                  })
-                }
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
-                  selectedTask.completed
-                    ? "bg-bcb-tea text-bcb-coffee border-bcb-tea"
-                    : "bg-bcb-surface text-stone-200 border-bcb-border hover:border-bcb-tea"
-                }`}
-              >
-                <CheckCircle2 className="w-4 h-4" />
-                {selectedTask.completed ? "Completed" : "Mark Complete"}
-              </button>
-              <button
-                onClick={() => setSelectedTask(null)}
-                className="p-1 rounded hover:bg-bcb-surface text-stone-400 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div>
-              <label className="text-[11px] uppercase tracking-wider text-stone-400 font-semibold">
-                Task Title
-              </label>
-              <input
-                type="text"
-                key={selectedTask.id}
-                defaultValue={selectedTask.title}
-                onBlur={(e) =>
-                  apiAction({
-                    action: "update_task",
-                    id: selectedTask.id,
-                    title: e.target.value,
-                  })
-                }
-                className="w-full mt-1 bg-bcb-canvas border border-bcb-border rounded-lg px-3 py-2 text-sm font-semibold text-white focus:border-bcb-cerulean focus:outline-none"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-[11px] uppercase tracking-wider text-stone-400 font-semibold">
-                  Assigned To
-                </label>
-                <select
-                  value={selectedTask.assignee}
-                  onChange={(e) =>
-                    apiAction({
-                      action: "update_task",
-                      id: selectedTask.id,
-                      assignee: e.target.value,
-                    })
-                  }
-                  className="w-full mt-1 bg-bcb-canvas border border-bcb-border rounded-lg px-3 py-2 text-xs text-white"
-                >
-                  <option value="You">👤 You</option>
-                  <option value="Gemini">✨ Gemini</option>
-                  <option value="Unassigned">Unassigned</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-[11px] uppercase tracking-wider text-stone-400 font-semibold">
-                  Due Date
-                </label>
-                <input
-                  type="date"
-                  value={selectedTask.due_date || ""}
-                  onChange={(e) =>
-                    apiAction({
-                      action: "update_task",
-                      id: selectedTask.id,
-                      due_date: e.target.value || null,
-                    })
-                  }
-                  className="w-full mt-1 bg-bcb-canvas border border-bcb-border rounded-lg px-3 py-2 text-xs text-white"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="text-[11px] uppercase tracking-wider text-stone-400 font-semibold">
-                Task Notes
-              </label>
-              <textarea
-                rows={5}
-                key={`desc-${selectedTask.id}`}
-                defaultValue={selectedTask.description}
-                onBlur={(e) =>
-                  apiAction({
-                    action: "update_task",
-                    id: selectedTask.id,
-                    description: e.target.value,
-                  })
-                }
-                placeholder="Add task details, links, or instructions for Gemini..."
-                className="w-full mt-1 bg-bcb-canvas border border-bcb-border rounded-lg p-3 text-xs text-stone-200 focus:border-bcb-cerulean focus:outline-none"
-              />
-            </div>
-          </div>
-
-          <div className="pt-4 border-t border-bcb-border flex items-center justify-between text-[11px] text-stone-400">
-            <span>Last updated by: {selectedTask.updated_by}</span>
-            <button
-              onClick={() => {
-                apiAction({ action: "delete_task", id: selectedTask.id });
-                setSelectedTask(null);
-              }}
-              className="text-red-400 hover:underline flex items-center gap-1"
-            >
-              <Trash2 className="w-3.5 h-3.5" /> Delete
-            </button>
-          </div>
-        </aside>
+        <TaskDetailDrawer
+          task={selectedTask}
+          projectFields={data.customFields.filter((f) => f.project_id === selectedTask.project_id)}
+          nowMs={nowMs}
+          onClose={() => setSelectedTaskId(null)}
+          onUpdateTask={apiAction}
+          onDeleteTask={(taskId) => apiAction({ action: "delete_task", id: taskId })}
+          onStartTimer={handleStartTimer}
+          onStopTimer={handleStopTimer}
+          onOpenCustomize={() => {
+            setActiveView(selectedTask.project_id);
+            setShowCustomizeModal(true);
+          }}
+        />
       )}
 
       {/* Modal: Customize Task Fields */}

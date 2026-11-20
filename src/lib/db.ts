@@ -53,6 +53,7 @@ export interface Task {
   created_at: string;
   updated_at: string;
   completed_at?: string | null;
+  timer_started_at?: string | null;
   updated_by: "You" | "Gemini";
   field_values: Record<string, string | number | null>;
 }
@@ -128,6 +129,7 @@ function initSchemaAndSeed(db: DatabaseSync) {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       completed_at TEXT,
+      timer_started_at TEXT,
       updated_by TEXT DEFAULT 'You',
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
       FOREIGN KEY (section_id) REFERENCES sections(id) ON DELETE CASCADE
@@ -322,10 +324,13 @@ function initSchemaAndSeed(db: DatabaseSync) {
 function applyMigrationsAndCleanup(db: DatabaseSync) {
   const now = new Date().toISOString();
 
-  // 0. Ensure completed_at and is_archived columns exist and backfill
+  // 0. Ensure completed_at, timer_started_at, and is_archived columns exist and backfill
   const cols = db.prepare("PRAGMA table_info(tasks)").all() as unknown as { name: string }[];
   if (!cols.some((c) => c.name === "completed_at")) {
     db.exec("ALTER TABLE tasks ADD COLUMN completed_at TEXT;");
+  }
+  if (!cols.some((c) => c.name === "timer_started_at")) {
+    db.exec("ALTER TABLE tasks ADD COLUMN timer_started_at TEXT;");
   }
   db.prepare("UPDATE tasks SET completed_at = updated_at WHERE completed = 1 AND completed_at IS NULL").run();
 
@@ -498,6 +503,12 @@ function applyMigrationsAndCleanup(db: DatabaseSync) {
   ).run(now);
   db.prepare(
     "UPDATE tasks SET completed = 1, completed_at = COALESCE(completed_at, ?), section_id = 'sec-feat-done' WHERE id = 'feat-task-5' AND completed = 0"
+  ).run(now);
+  db.prepare(
+    "UPDATE tasks SET completed = 1, completed_at = COALESCE(completed_at, ?), section_id = 'sec-feat-done' WHERE id = 'feat-task-4' AND completed = 0"
+  ).run(now);
+  db.prepare(
+    "UPDATE tasks SET completed = 1, completed_at = COALESCE(completed_at, ?), section_id = 'sec-feat-done' WHERE id = 'feat-task-8' AND completed = 0"
   ).run(now);
   db.prepare("DELETE FROM tasks WHERE id = 'feat-task-3'").run();
 
