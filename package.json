@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "next dev --port 3000",
     "build": "next build",
-    "start": "next start --port 3000"
+    "start": "next start --port 3000",
+    "mcp": "node --no-warnings mcp/bcb-mcp-server.mjs",
+    "test:mcp": "node --no-warnings mcp/test-mcp.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
