@@ -31,6 +31,8 @@ export default function InlineFieldInput({
       ? ""
       : String(value);
 
+  const disallowNegative = isNumeric && min !== undefined && Number(min) >= 0;
+
   const [draft, setDraft] = useState(formatted);
   const [isFocused, setIsFocused] = useState(false);
 
@@ -49,14 +51,29 @@ export default function InlineFieldInput({
       placeholder={placeholder}
       disabled={disabled}
       onFocus={() => setIsFocused(true)}
-      onChange={(e) => setDraft(e.target.value)}
+      onChange={(e) => {
+        const next = disallowNegative ? e.target.value.replace(/-/g, "") : e.target.value;
+        setDraft(next);
+      }}
       onBlur={() => {
         setIsFocused(false);
-        if (draft !== formatted) {
-          onCommit(draft);
+        let finalVal = draft;
+        if (disallowNegative && finalVal.trim() !== "") {
+          const num = Number(finalVal);
+          if (Number.isNaN(num) || num < 0) {
+            finalVal = "0";
+            setDraft("0");
+          }
+        }
+        if (finalVal !== formatted) {
+          onCommit(finalVal);
         }
       }}
       onKeyDown={(e) => {
+        if (disallowNegative && (e.key === "-" || e.key === "e" || e.key === "E")) {
+          e.preventDefault();
+          return;
+        }
         if (e.key === "Enter") {
           e.currentTarget.blur();
         } else if (e.key === "Escape") {

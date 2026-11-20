@@ -8,6 +8,25 @@ function isCompletionSectionName(name: string): boolean {
   return ["completed", "done", "complete"].includes(name.trim().toLowerCase());
 }
 
+function validateNonNegativeTimeFields(
+  db: DatabaseSync,
+  fieldValues: Record<string, any> | undefined
+): string | null {
+  if (!fieldValues || typeof fieldValues !== "object") return null;
+  const lookup = db.prepare("SELECT name, field_type FROM custom_field_defs WHERE id = ?");
+  for (const [fid, val] of Object.entries(fieldValues)) {
+    if (val === "" || val === null || val === undefined) continue;
+    const fieldDef = lookup.get(fid) as { name: string; field_type: string } | undefined;
+    if (fieldDef?.field_type === "time_hours") {
+      const num = Number(val);
+      if (Number.isNaN(num) || num < 0) {
+        return `"${fieldDef.name}" cannot be negative.`;
+      }
+    }
+  }
+  return null;
+}
+
 function accumulateRunningTimer(db: DatabaseSync, existingTask: any, now: string) {
   if (!existingTask.timer_started_at) return null;
 
@@ -120,6 +139,11 @@ export async function POST(req: NextRequest) {
       const id = `task-${crypto.randomUUID().slice(0, 8)}`;
       const { project_id, section_id, title, description = "", assignee = "You", due_date = null, field_values = {} } = body;
 
+      const timeValidationError = validateNonNegativeTimeFields(db, field_values);
+      if (timeValidationError) {
+        return NextResponse.json({ error: timeValidationError }, { status: 400 });
+      }
+
       db.prepare(`
         INSERT INTO tasks (id, project_id, section_id, title, description, completed, assignee, due_date, created_at, updated_at, updated_by)
         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
@@ -154,6 +178,11 @@ export async function POST(req: NextRequest) {
       const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as any;
       if (!existing) {
         return NextResponse.json({ error: "Task not found" }, { status: 404 });
+      }
+
+      const timeValidationError = validateNonNegativeTimeFields(db, field_values);
+      if (timeValidationError) {
+        return NextResponse.json({ error: timeValidationError }, { status: 400 });
       }
 
       const newTitle = title !== undefined ? title : existing.title;

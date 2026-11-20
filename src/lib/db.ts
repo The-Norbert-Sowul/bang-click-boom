@@ -339,8 +339,11 @@ function applyMigrationsAndCleanup(db: DatabaseSync) {
     db.exec("ALTER TABLE projects ADD COLUMN is_archived INTEGER DEFAULT 0;");
   }
 
-  // 1. Remove any Budget / currency custom fields and values
+  // 1. Remove any Budget / currency custom fields and values, and clamp any legacy negative time values to 0
   db.prepare("DELETE FROM custom_field_defs WHERE LOWER(name) = 'budget' OR field_type = 'currency'").run();
+  db.prepare(
+    "UPDATE task_field_values SET value_number = 0 WHERE value_number < 0 AND field_id IN (SELECT id FROM custom_field_defs WHERE field_type = 'time_hours')"
+  ).run();
 
   // 2. Scrub any legacy brand references from existing DB records
   const legacyBrand = ["Asa", "na"].join("");
@@ -509,6 +512,9 @@ function applyMigrationsAndCleanup(db: DatabaseSync) {
   ).run(now);
   db.prepare(
     "UPDATE tasks SET completed = 1, completed_at = COALESCE(completed_at, ?), section_id = 'sec-feat-done' WHERE id = 'feat-task-8' AND completed = 0"
+  ).run(now);
+  db.prepare(
+    "UPDATE tasks SET completed = 1, completed_at = COALESCE(completed_at, ?), section_id = 'sec-feat-done' WHERE id = 'feat-task-9' AND completed = 0"
   ).run(now);
   db.prepare("DELETE FROM tasks WHERE id = 'feat-task-3'").run();
 
