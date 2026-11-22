@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -61,19 +62,26 @@ try {
   for (const name of EXPECTED_TOOLS) {
     assert.ok(toolNames.includes(name), `Missing expected MCP tool: ${name}`);
   }
-  console.log(`PASS 1/11: All ${EXPECTED_TOOLS.length} tools listed.`);
+  console.log(`PASS 1/14: All ${EXPECTED_TOOLS.length} tools listed.`);
 
   // 2. bcb_list_workspace
   const ws = parseToolResult(await client.callTool({ name: "bcb_list_workspace", arguments: {} }));
   assert.ok(ws.portfolios.length >= 1, "Expected at least 1 portfolio");
   assert.ok(ws.projects.length >= 1, "Expected at least 1 active project");
-  const targetProject = ws.projects[0];
-  console.log(`PASS 2/11: bcb_list_workspace returned ${ws.projects.length} active project(s).`);
+  const targetProject =
+    ws.projects.find((p) => p.in_progress_section_id && p.completed_section_id) || ws.projects[0];
+  assert.ok("in_progress_section_id" in targetProject, "Expected in_progress_section_id on project");
+  assert.ok("completed_section_id" in targetProject, "Expected completed_section_id on project");
+  assert.ok(
+    targetProject.sections.some((s) => s.automation_role === "completed"),
+    "Expected at least one section with automation_role='completed'"
+  );
+  console.log(`PASS 2/14: bcb_list_workspace returned ${ws.projects.length} active project(s) with automation roles.`);
 
   // 3. bcb_list_tasks excludes archived projects by default
   const openList = parseToolResult(await client.callTool({ name: "bcb_list_tasks", arguments: {} }));
   assert.ok(openList.tasks.every((t) => !t.project_is_archived), "Archived tasks leaked into default list");
-  console.log(`PASS 3/11: bcb_list_tasks excluded archived projects (${openList.count} active tasks).`);
+  console.log(`PASS 3/14: bcb_list_tasks excluded archived projects (${openList.count} active tasks).`);
 
   // 4. Negative time rejection
   const negRes = await client.callTool({
@@ -86,7 +94,7 @@ try {
   });
   assert.ok(negRes.isError, "Expected negative Estimated Time to be rejected");
   assert.match(negRes.content[0].text, /negative/i);
-  console.log("PASS 4/11: Rejected negative Estimated Time cleanly.");
+  console.log("PASS 4/14: Rejected negative Estimated Time cleanly.");
 
   // 5. Create task with named custom fields
   const createdRes = parseToolResult(
@@ -110,7 +118,7 @@ try {
   assert.equal(createdRes.task.fields.Priority, "High");
   assert.equal(createdRes.task.fields["Estimated Time"], 1.5);
   assert.equal(createdRes.task.fields["Actual Time"], 0.25);
-  console.log(`PASS 5/11: Created task ${taskId} with named custom fields.`);
+  console.log(`PASS 5/14: Created task ${taskId} with named custom fields.`);
 
   // 6. Start timer -> auto-moves to In Progress
   const startRes = parseToolResult(await client.callTool({ name: "bcb_start_timer", arguments: { task_id: taskId } }));
@@ -166,12 +174,69 @@ try {
   assert.ok(Array.isArray(analytics.recent_activity) && analytics.recent_activity.length >= 1);
   console.log("PASS 10/11: bcb_get_analytics returned valid summary, project rollups, and recent activity.");
 
-  // 11. Delete test task
+  // 11. Rename mapped sections in temp DB and verify ID-based automations still work without duplicates
+  const testDb = new DatabaseSync(tempDbPath);
+  const sectionCountBefore = testDb
+    .prepare("SELECT COUNT(*) as c FROM sections WHERE project_id = ?")
+    .get(targetProject.id).c;
+  if (targetProject.in_progress_section_id) {
+    testDb.prepare("UPDATE sections SET name = 'Active Work' WHERE id = ?").run(targetProject.in_progress_section_id);
+  }
+  if (targetProject.completed_section_id) {
+    testDb.prepare("UPDATE sections SET name = 'Shipped' WHERE id = ?").run(targetProject.completed_section_id);
+  }
+
+  const renamedStartRes = parseToolResult(
+    await client.callTool({ name: "bcb_start_timer", arguments: { task_id: taskId } })
+  );
+  if (targetProject.in_progress_section_id) {
+    assert.equal(renamedStartRes.task.section_id, targetProject.in_progress_section_id);
+    assert.equal(renamedStartRes.task.section_name, "Active Work");
+  }
+  const sectionCountAfter = testDb
+    .prepare("SELECT COUNT(*) as c FROM sections WHERE project_id = ?")
+    .get(targetProject.id).c;
+  assert.equal(sectionCountAfter, sectionCountBefore, "Starting timer on renamed section should not create a duplicate");
+
+  const renamedDoneRes = parseToolResult(
+    await client.callTool({ name: "bcb_update_task", arguments: { task_id: taskId, completed: true } })
+  );
+  assert.equal(renamedDoneRes.task.completed, true);
+  if (targetProject.completed_section_id) {
+    assert.equal(renamedDoneRes.task.section_id, targetProject.completed_section_id);
+    assert.equal(renamedDoneRes.task.section_name, "Shipped");
+  }
+  console.log("PASS 11/14: ID-based timer & completion automations worked after renaming sections.");
+
+  // 12. Reopening a completed task leaves it in its current section
+  const reopenInPlaceRes = parseToolResult(
+    await client.callTool({ name: "bcb_update_task", arguments: { task_id: taskId, completed: false } })
+  );
+  assert.equal(reopenInPlaceRes.task.completed, false);
+  assert.equal(
+    reopenInPlaceRes.task.section_id,
+    renamedDoneRes.task.section_id,
+    "Reopening a task without explicit section should leave it in its current section"
+  );
+  console.log("PASS 12/14: Reopening completed task preserved its current section.");
+
+  // 13. Setting in_progress_section_id = NULL starts timer without moving task
+  testDb.prepare("UPDATE projects SET in_progress_section_id = NULL WHERE id = ?").run(targetProject.id);
+  const noMoveStartRes = parseToolResult(
+    await client.callTool({ name: "bcb_start_timer", arguments: { task_id: taskId } })
+  );
+  assert.equal(noMoveStartRes.task.timer_running, true);
+  assert.equal(noMoveStartRes.moved_to_section, null);
+  assert.equal(noMoveStartRes.task.section_id, reopenInPlaceRes.task.section_id);
+  testDb.close();
+  console.log("PASS 13/14: Starting timer with in_progress_section_id=NULL did not move task.");
+
+  // 14. Delete test task
   const delRes = parseToolResult(await client.callTool({ name: "bcb_delete_task", arguments: { task_id: taskId } }));
   assert.equal(delRes.deleted, true);
-  console.log("PASS 11/11: bcb_delete_task cleaned up test task.");
+  console.log("PASS 14/14: bcb_delete_task cleaned up test task.");
 
-  console.log("\nALL 11 MCP INTEGRATION TESTS PASSED!");
+  console.log("\nALL 14 MCP INTEGRATION TESTS PASSED!");
 } finally {
   await client.close().catch(() => {});
   fs.rmSync(tempDir, { recursive: true, force: true });

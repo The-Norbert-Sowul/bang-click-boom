@@ -49,12 +49,22 @@ export interface DrawerTask {
   field_values: Record<string, string | number | null>;
 }
 
+export interface DrawerSection {
+  id: string;
+  project_id: string;
+  name: string;
+  sort_order: number;
+}
+
 interface TaskDetailDrawerProps {
   task: DrawerTask;
   projectFields: DrawerCustomFieldDef[];
+  projectSections: DrawerSection[];
+  inProgressSectionName: string | null;
   nowMs: number;
   onClose: () => void;
   onUpdateTask: (payload: Record<string, any>) => Promise<any>;
+  onMoveSection: (task: DrawerTask, targetSection: DrawerSection) => Promise<any>;
   onDeleteTask: (taskId: string) => Promise<any>;
   onStartTimer: (task: DrawerTask) => Promise<any>;
   onStopTimer: (task: DrawerTask) => Promise<any>;
@@ -64,9 +74,12 @@ interface TaskDetailDrawerProps {
 export default function TaskDetailDrawer({
   task,
   projectFields,
+  projectSections,
+  inProgressSectionName,
   nowMs,
   onClose,
   onUpdateTask,
+  onMoveSection,
   onDeleteTask,
   onStartTimer,
   onStopTimer,
@@ -222,7 +235,11 @@ export default function TaskDetailDrawer({
                 <button
                   type="button"
                   onClick={() => onStartTimer(task)}
-                  title="Start timer and move task to In Progress"
+                  title={
+                    inProgressSectionName
+                      ? `Start timer and move task to "${inProgressSectionName}"`
+                      : "Start timer"
+                  }
                   className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-bcb-cerulean hover:bg-bcb-cerulean-light text-white transition"
                 >
                   <Play className="w-3.5 h-3.5 fill-current" />
@@ -298,7 +315,29 @@ export default function TaskDetailDrawer({
         {/* 4. Visual Break */}
         <div className="border-t border-bcb-border" />
 
-        {/* 5. Assigned To & Due Date */}
+        {/* 5. Section, Assigned To & Due Date */}
+        <div>
+          <label className="text-[11px] uppercase tracking-wider text-stone-400 font-semibold">
+            Section
+          </label>
+          <select
+            value={task.section_id}
+            onChange={(e) => {
+              const target = projectSections.find((s) => s.id === e.target.value);
+              if (target && target.id !== task.section_id) {
+                onMoveSection(task, target);
+              }
+            }}
+            className="w-full mt-1 bg-bcb-canvas border border-bcb-border rounded-lg px-3 py-2 text-xs text-white focus:border-bcb-cerulean focus:outline-none"
+          >
+            {projectSections.map((sec) => (
+              <option key={sec.id} value={sec.id}>
+                {sec.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-[11px] uppercase tracking-wider text-stone-400 font-semibold">

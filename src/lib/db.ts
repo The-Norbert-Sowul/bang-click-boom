@@ -22,6 +22,8 @@ export interface Project {
   status: string;
   icon: string;
   is_archived: number;
+  in_progress_section_id: string | null;
+  completed_section_id: string | null;
 }
 
 export interface Section {
@@ -96,6 +98,8 @@ function initSchemaAndSeed(db: DatabaseSync) {
       status TEXT DEFAULT 'On Track',
       icon TEXT DEFAULT 'FolderKanban',
       is_archived INTEGER DEFAULT 0,
+      in_progress_section_id TEXT,
+      completed_section_id TEXT,
       FOREIGN KEY (portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE
     );
 
@@ -173,22 +177,30 @@ function initSchemaAndSeed(db: DatabaseSync) {
   const bcbProjectId = "proj-bcb";
   const personalProjectId = "proj-personal";
 
-  db.prepare("INSERT INTO projects (id, portfolio_id, name, description, status, icon) VALUES (?, ?, ?, ?, ?, ?)").run(
+  db.prepare(
+    "INSERT INTO projects (id, portfolio_id, name, description, status, icon, in_progress_section_id, completed_section_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(
     bcbProjectId,
     portfolioId,
     "Bang Click Boom (BCB) Launch",
     "Co-building our Todo & Portfolio hub with Gemini MCP + Skill integration.",
     "On Track",
-    "Rocket"
+    "Rocket",
+    "sec-bcb-doing",
+    "sec-bcb-done"
   );
 
-  db.prepare("INSERT INTO projects (id, portfolio_id, name, description, status, icon) VALUES (?, ?, ?, ?, ?, ?)").run(
+  db.prepare(
+    "INSERT INTO projects (id, portfolio_id, name, description, status, icon, in_progress_section_id, completed_section_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(
     personalProjectId,
     portfolioId,
     "Personal Daily Goals",
     "Personal errands, learning goals, and life admin tasks.",
     "On Track",
-    "CheckSquare"
+    "CheckSquare",
+    null,
+    "sec-pers-done"
   );
 
   // 3. Seed Sections for both projects
@@ -340,6 +352,44 @@ function applyMigrationsAndCleanup(db: DatabaseSync) {
     db.exec("ALTER TABLE projects ADD COLUMN is_archived INTEGER DEFAULT 0;");
   }
 
+  let addedInProgressCol = false;
+  let addedCompletedCol = false;
+  if (!projCols.some((c) => c.name === "in_progress_section_id")) {
+    db.exec("ALTER TABLE projects ADD COLUMN in_progress_section_id TEXT;");
+    addedInProgressCol = true;
+  }
+  if (!projCols.some((c) => c.name === "completed_section_id")) {
+    db.exec("ALTER TABLE projects ADD COLUMN completed_section_id TEXT;");
+    addedCompletedCol = true;
+  }
+
+  // One-time backfill of automation section IDs for existing projects when columns are newly added
+  if (addedInProgressCol || addedCompletedCol) {
+    const existingProjects = db.prepare("SELECT id FROM projects").all() as unknown as { id: string }[];
+    for (const proj of existingProjects) {
+      if (addedInProgressCol) {
+        const inProgSec = db
+          .prepare(
+            "SELECT id FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('in progress', 'in-progress', 'doing') ORDER BY sort_order ASC LIMIT 1"
+          )
+          .get(proj.id) as { id: string } | undefined;
+        if (inProgSec) {
+          db.prepare("UPDATE projects SET in_progress_section_id = ? WHERE id = ?").run(inProgSec.id, proj.id);
+        }
+      }
+      if (addedCompletedCol) {
+        const doneSec = db
+          .prepare(
+            "SELECT id FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('completed', 'done', 'complete') ORDER BY sort_order DESC LIMIT 1"
+          )
+          .get(proj.id) as { id: string } | undefined;
+        if (doneSec) {
+          db.prepare("UPDATE projects SET completed_section_id = ? WHERE id = ?").run(doneSec.id, proj.id);
+        }
+      }
+    }
+  }
+
   // 1. Remove any Budget / currency custom fields and values, and clamp any legacy negative time values to 0
   db.prepare("DELETE FROM custom_field_defs WHERE LOWER(name) = 'budget' OR field_type = 'currency'").run();
   db.prepare(
@@ -358,38 +408,24 @@ function applyMigrationsAndCleanup(db: DatabaseSync) {
     "UPDATE activity_log SET action = REPLACE(REPLACE(action, ? || '-inspired ', ''), ? || ' ', '') WHERE action LIKE '%' || ? || '%'"
   ).run(legacyBrand, legacyBrand, legacyBrand);
 
-  // 3. Ensure any already-completed tasks are placed inside their project's Completed/Done section
-  const allProjects = db.prepare("SELECT id FROM projects").all() as unknown as { id: string }[];
-  for (const proj of allProjects) {
-    const doneSection = db
-      .prepare(
-        "SELECT id FROM sections WHERE project_id = ? AND LOWER(name) IN ('completed', 'done', 'complete') ORDER BY sort_order DESC LIMIT 1"
-      )
-      .get(proj.id) as { id: string } | undefined;
-    if (doneSection) {
-      db.prepare("UPDATE tasks SET section_id = ? WHERE project_id = ? AND completed = 1 AND section_id != ?").run(
-        doneSection.id,
-        proj.id,
-        doneSection.id
-      );
-    }
-  }
-
-  // 4. Seed the "BCB Feature List" project with all 8 "Todo - Later" items if it doesn't exist yet
+  // 3. Seed the "BCB Feature List" project with all 8 "Todo - Later" items if it doesn't exist yet
   const featureProjId = "proj-bcb-features";
   const existingFeatureProj = db.prepare("SELECT id FROM projects WHERE id = ?").get(featureProjId);
   if (!existingFeatureProj) {
-    db.prepare(
-      "INSERT INTO projects (id, portfolio_id, name, description, status, icon) VALUES (?, 'port-1', ?, ?, 'On Track', 'FolderKanban')"
-    ).run(
-      featureProjId,
-      "BCB Feature List",
-      "Backlog of upcoming features, enhancements, and Todo - Later items from our iteration reviews."
-    );
-
     const secTodo = "sec-feat-todo";
     const secDoing = "sec-feat-doing";
     const secDone = "sec-feat-done";
+
+    db.prepare(
+      "INSERT INTO projects (id, portfolio_id, name, description, status, icon, in_progress_section_id, completed_section_id) VALUES (?, 'port-1', ?, ?, 'On Track', 'FolderKanban', ?, ?)"
+    ).run(
+      featureProjId,
+      "BCB Feature List",
+      "Backlog of upcoming features, enhancements, and Todo - Later items from our iteration reviews.",
+      secDoing,
+      secDone
+    );
+
     const insertSection = db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, ?, ?)");
     insertSection.run(secTodo, featureProjId, "To Do", 1);
     insertSection.run(secDoing, featureProjId, "In Progress", 2);

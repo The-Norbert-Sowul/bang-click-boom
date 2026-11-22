@@ -42,10 +42,63 @@ function ensureSchemaColumns(db) {
   if (!projCols.includes("is_archived")) {
     db.exec("ALTER TABLE projects ADD COLUMN is_archived INTEGER DEFAULT 0;");
   }
+
+  let addedInProgressCol = false;
+  let addedCompletedCol = false;
+  if (!projCols.includes("in_progress_section_id")) {
+    db.exec("ALTER TABLE projects ADD COLUMN in_progress_section_id TEXT;");
+    addedInProgressCol = true;
+  }
+  if (!projCols.includes("completed_section_id")) {
+    db.exec("ALTER TABLE projects ADD COLUMN completed_section_id TEXT;");
+    addedCompletedCol = true;
+  }
+
+  if (addedInProgressCol || addedCompletedCol) {
+    const projects = db.prepare("SELECT id FROM projects").all();
+    for (const proj of projects) {
+      if (addedInProgressCol) {
+        const inProgSec = db
+          .prepare(
+            "SELECT id FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('in progress', 'in-progress', 'doing') ORDER BY sort_order ASC LIMIT 1"
+          )
+          .get(proj.id);
+        if (inProgSec) {
+          db.prepare("UPDATE projects SET in_progress_section_id = ? WHERE id = ?").run(inProgSec.id, proj.id);
+        }
+      }
+      if (addedCompletedCol) {
+        const doneSec = db
+          .prepare(
+            "SELECT id FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('completed', 'done', 'complete') ORDER BY sort_order DESC LIMIT 1"
+          )
+          .get(proj.id);
+        if (doneSec) {
+          db.prepare("UPDATE projects SET completed_section_id = ? WHERE id = ?").run(doneSec.id, proj.id);
+        }
+      }
+    }
+  }
 }
 
-function isCompletionSectionName(name) {
-  return ["completed", "done", "complete"].includes(String(name || "").trim().toLowerCase());
+function getProjectAutomationSections(db, projectId) {
+  const proj = db
+    .prepare("SELECT in_progress_section_id, completed_section_id FROM projects WHERE id = ?")
+    .get(projectId);
+  if (!proj) {
+    return { inProgressSection: null, completedSection: null };
+  }
+  const inProgressSection = proj.in_progress_section_id
+    ? db
+        .prepare("SELECT id, name FROM sections WHERE id = ? AND project_id = ?")
+        .get(proj.in_progress_section_id, projectId) || null
+    : null;
+  const completedSection = proj.completed_section_id
+    ? db
+        .prepare("SELECT id, name FROM sections WHERE id = ? AND project_id = ?")
+        .get(proj.completed_section_id, projectId) || null
+    : null;
+  return { inProgressSection, completedSection };
 }
 
 function formatDurationCompact(totalSeconds) {
@@ -126,47 +179,6 @@ function resolveSection(db, projectId, { section_id, section_name, allowDefault 
   }
 
   return sections[0];
-}
-
-function findOrCreateInProgressSection(db, projectId) {
-  const existing = db
-    .prepare(
-      "SELECT id, name FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('in progress', 'in-progress', 'doing') ORDER BY sort_order ASC LIMIT 1"
-    )
-    .get(projectId);
-
-  if (existing) return existing;
-
-  const doneSec = db
-    .prepare(
-      "SELECT id, sort_order FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('completed', 'done', 'complete') ORDER BY sort_order ASC LIMIT 1"
-    )
-    .get(projectId);
-
-  const newId = `sec-${crypto.randomUUID().slice(0, 8)}`;
-
-  if (doneSec) {
-    db.prepare("UPDATE sections SET sort_order = sort_order + 1 WHERE project_id = ? AND sort_order >= ?").run(
-      projectId,
-      doneSec.sort_order
-    );
-    db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'In Progress', ?)").run(
-      newId,
-      projectId,
-      doneSec.sort_order
-    );
-  } else {
-    const maxRow = db
-      .prepare("SELECT COALESCE(MAX(sort_order), 0) as max_order FROM sections WHERE project_id = ?")
-      .get(projectId);
-    db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'In Progress', ?)").run(
-      newId,
-      projectId,
-      maxRow.max_order + 1
-    );
-  }
-
-  return { id: newId, name: "In Progress" };
 }
 
 function accumulateRunningTimer(db, existingTask, now) {
@@ -432,7 +444,19 @@ server.registerTool(
       const enrichedProjects = projects.map((p) => ({
         ...p,
         is_archived: Boolean(p.is_archived),
-        sections: sections.filter((s) => s.project_id === p.id),
+        in_progress_section_id: p.in_progress_section_id ?? null,
+        completed_section_id: p.completed_section_id ?? null,
+        sections: sections
+          .filter((s) => s.project_id === p.id)
+          .map((s) => ({
+            ...s,
+            automation_role:
+              p.in_progress_section_id === s.id
+                ? "in_progress"
+                : p.completed_section_id === s.id
+                  ? "completed"
+                  : null,
+          })),
         custom_fields: customFields
           .filter((f) => f.project_id === p.id)
           .map((f) => {
@@ -595,7 +619,8 @@ server.registerTool(
       const writes = resolveAndValidateCustomFields(db, proj.id, args.custom_fields);
 
       const id = `task-${crypto.randomUUID().slice(0, 8)}`;
-      const isDoneSection = isCompletionSectionName(section.name);
+      const { completedSection } = getProjectAutomationSections(db, proj.id);
+      const isDoneSection = Boolean(completedSection && completedSection.id === section.id);
 
       db.prepare(`
         INSERT INTO tasks (id, project_id, section_id, title, description, completed, assignee, due_date, created_at, updated_at, completed_at, timer_started_at, updated_by)
@@ -685,6 +710,7 @@ server.registerTool(
       let timerSummary = null;
       let movedToSectionName = null;
 
+      const { completedSection } = getProjectAutomationSections(db, existing.project_id);
       const hasExplicitSection = args.section_id !== undefined || args.section_name !== undefined;
       if (hasExplicitSection) {
         const targetSec = resolveSection(db, existing.project_id, {
@@ -694,7 +720,7 @@ server.registerTool(
         });
         newSectionId = targetSec.id;
         movedToSectionName = targetSec.name;
-        const isTargetDone = isCompletionSectionName(targetSec.name);
+        const isTargetDone = Boolean(completedSection && completedSection.id === targetSec.id);
 
         if (args.completed !== undefined) {
           newCompleted = args.completed ? 1 : 0;
@@ -709,18 +735,8 @@ server.registerTool(
       } else if (args.completed !== undefined) {
         newCompleted = args.completed ? 1 : 0;
         newCompletedAt = newCompleted === 1 ? now : null;
-        if (newCompleted === 1) {
-          const doneSec = db
-            .prepare(
-              "SELECT id FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('completed', 'done', 'complete') ORDER BY sort_order DESC LIMIT 1"
-            )
-            .get(existing.project_id);
-          if (doneSec) newSectionId = doneSec.id;
-        } else {
-          const todoSec = db
-            .prepare("SELECT id FROM sections WHERE project_id = ? ORDER BY sort_order ASC LIMIT 1")
-            .get(existing.project_id);
-          if (todoSec) newSectionId = todoSec.id;
+        if (newCompleted === 1 && completedSection) {
+          newSectionId = completedSection.id;
         }
       }
 
@@ -828,26 +844,27 @@ server.registerTool(
       }
 
       const now = new Date().toISOString();
-      const inProgressSec = findOrCreateInProgressSection(db, existing.project_id);
-      const moved = existing.section_id !== inProgressSec.id;
+      const { inProgressSection } = getProjectAutomationSections(db, existing.project_id);
+      const targetSectionId = inProgressSection ? inProgressSection.id : existing.section_id;
+      const moved = Boolean(inProgressSection && existing.section_id !== inProgressSection.id);
 
       db.prepare(`
         UPDATE tasks
         SET timer_started_at = ?, section_id = ?, completed = 0, completed_at = NULL, updated_at = ?, updated_by = ?
         WHERE id = ?
-      `).run(now, inProgressSec.id, now, actor, task_id);
+      `).run(now, targetSectionId, now, actor, task_id);
 
       logActivity(
         db,
         actor,
-        moved ? `Started timer & moved to "${inProgressSec.name}"` : "Started timer",
+        moved && inProgressSection ? `Started timer & moved to "${inProgressSection.name}"` : "Started timer",
         existing.title,
         now
       );
 
       return ok({
         started: true,
-        moved_to_section: moved ? inProgressSec.name : null,
+        moved_to_section: moved && inProgressSection ? inProgressSection.name : null,
         task: getHydratedTaskById(db, task_id),
       });
     } catch (err) {
@@ -943,20 +960,21 @@ server.registerTool(
       }
 
       const id = `proj-${crypto.randomUUID().slice(0, 8)}`;
-      db.prepare(
-        "INSERT INTO projects (id, portfolio_id, name, description, status, icon, is_archived) VALUES (?, ?, ?, ?, 'On Track', 'FolderKanban', 0)"
-      ).run(id, portfolioId, name, args.description ?? "");
+      const secTodoId = `sec-${id}-1`;
+      const secDoingId = `sec-${id}-2`;
+      const secDoneId = `sec-${id}-3`;
 
-      db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'To Do', 1)").run(
-        `sec-${id}-1`,
-        id
-      );
+      db.prepare(
+        "INSERT INTO projects (id, portfolio_id, name, description, status, icon, is_archived, in_progress_section_id, completed_section_id) VALUES (?, ?, ?, ?, 'On Track', 'FolderKanban', 0, ?, ?)"
+      ).run(id, portfolioId, name, args.description ?? "", secDoingId, secDoneId);
+
+      db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'To Do', 1)").run(secTodoId, id);
       db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'In Progress', 2)").run(
-        `sec-${id}-2`,
+        secDoingId,
         id
       );
       db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'Completed', 3)").run(
-        `sec-${id}-3`,
+        secDoneId,
         id
       );
 

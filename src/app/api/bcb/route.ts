@@ -4,8 +4,33 @@ import { formatDurationCompact } from "@/lib/timeUtils";
 import { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 
-function isCompletionSectionName(name: string): boolean {
-  return ["completed", "done", "complete"].includes(name.trim().toLowerCase());
+function getProjectAutomationSections(db: DatabaseSync, projectId: string): {
+  inProgressSection: { id: string; name: string } | null;
+  completedSection: { id: string; name: string } | null;
+} {
+  const proj = db
+    .prepare("SELECT in_progress_section_id, completed_section_id FROM projects WHERE id = ?")
+    .get(projectId) as
+    | { in_progress_section_id: string | null; completed_section_id: string | null }
+    | undefined;
+
+  if (!proj) {
+    return { inProgressSection: null, completedSection: null };
+  }
+
+  const inProgressSection = proj.in_progress_section_id
+    ? ((db
+        .prepare("SELECT id, name FROM sections WHERE id = ? AND project_id = ?")
+        .get(proj.in_progress_section_id, projectId) as { id: string; name: string } | undefined) ?? null)
+    : null;
+
+  const completedSection = proj.completed_section_id
+    ? ((db
+        .prepare("SELECT id, name FROM sections WHERE id = ? AND project_id = ?")
+        .get(proj.completed_section_id, projectId) as { id: string; name: string } | undefined) ?? null)
+    : null;
+
+  return { inProgressSection, completedSection };
 }
 
 function validateNonNegativeTimeFields(
@@ -78,47 +103,6 @@ function accumulateRunningTimer(db: DatabaseSync, existingTask: any, now: string
   };
 }
 
-function findOrCreateInProgressSection(db: DatabaseSync, projectId: string): { id: string; name: string } {
-  const existing = db
-    .prepare(
-      "SELECT id, name FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('in progress', 'in-progress', 'doing') ORDER BY sort_order ASC LIMIT 1"
-    )
-    .get(projectId) as { id: string; name: string } | undefined;
-
-  if (existing) return existing;
-
-  const doneSec = db
-    .prepare(
-      "SELECT id, sort_order FROM sections WHERE project_id = ? AND LOWER(TRIM(name)) IN ('completed', 'done', 'complete') ORDER BY sort_order ASC LIMIT 1"
-    )
-    .get(projectId) as { id: string; sort_order: number } | undefined;
-
-  const newId = `sec-${crypto.randomUUID().slice(0, 8)}`;
-
-  if (doneSec) {
-    db.prepare("UPDATE sections SET sort_order = sort_order + 1 WHERE project_id = ? AND sort_order >= ?").run(
-      projectId,
-      doneSec.sort_order
-    );
-    db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'In Progress', ?)").run(
-      newId,
-      projectId,
-      doneSec.sort_order
-    );
-  } else {
-    const maxRow = db
-      .prepare("SELECT COALESCE(MAX(sort_order), 0) as max_order FROM sections WHERE project_id = ?")
-      .get(projectId) as { max_order: number };
-    db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'In Progress', ?)").run(
-      newId,
-      projectId,
-      maxRow.max_order + 1
-    );
-  }
-
-  return { id: newId, name: "In Progress" };
-}
-
 export async function GET() {
   try {
     const data = getFullWorkspaceData();
@@ -144,10 +128,26 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: timeValidationError }, { status: 400 });
       }
 
+      const { completedSection } = getProjectAutomationSections(db, project_id);
+      const isDoneSection = Boolean(completedSection && completedSection.id === section_id);
+
       db.prepare(`
-        INSERT INTO tasks (id, project_id, section_id, title, description, completed, assignee, due_date, created_at, updated_at, updated_by)
-        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
-      `).run(id, project_id, section_id, title, description, assignee, due_date, now, now, actor);
+        INSERT INTO tasks (id, project_id, section_id, title, description, completed, assignee, due_date, created_at, updated_at, completed_at, updated_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        project_id,
+        section_id,
+        title,
+        description,
+        isDoneSection ? 1 : 0,
+        assignee,
+        due_date,
+        now,
+        now,
+        isDoneSection ? now : null,
+        actor
+      );
 
       const upsertVal = db.prepare(`
         INSERT OR REPLACE INTO task_field_values (task_id, field_id, value_text, value_number)
@@ -199,22 +199,13 @@ export async function POST(req: NextRequest) {
         newTimerStartedAt = null;
       }
 
-      // Automatically move task to "Completed"/"Done" section when marked complete,
-      // or back to the first section ("To Do") when reopened if no explicit section_id was passed
+      // Automatically move task to the project's configured Completed section when marked complete.
+      // When reopened (completed = false) without an explicit section_id, leave the task in its current section.
       let newSectionId = section_id !== undefined ? section_id : existing.section_id;
-      if (completed !== undefined && section_id === undefined) {
-        if (newCompleted === 1) {
-          const doneSec = db
-            .prepare(
-              "SELECT id FROM sections WHERE project_id = ? AND LOWER(name) IN ('completed', 'done', 'complete') ORDER BY sort_order DESC LIMIT 1"
-            )
-            .get(existing.project_id) as { id: string } | undefined;
-          if (doneSec) newSectionId = doneSec.id;
-        } else {
-          const todoSec = db
-            .prepare("SELECT id FROM sections WHERE project_id = ? ORDER BY sort_order ASC LIMIT 1")
-            .get(existing.project_id) as { id: string } | undefined;
-          if (todoSec) newSectionId = todoSec.id;
+      if (completed !== undefined && section_id === undefined && newCompleted === 1) {
+        const { completedSection } = getProjectAutomationSections(db, existing.project_id);
+        if (completedSection) {
+          newSectionId = completedSection.id;
         }
       }
 
@@ -280,25 +271,26 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(getFullWorkspaceData());
       }
 
-      const inProgressSec = findOrCreateInProgressSection(db, existing.project_id);
-      const moved = existing.section_id !== inProgressSec.id;
+      const { inProgressSection } = getProjectAutomationSections(db, existing.project_id);
+      const targetSectionId = inProgressSection ? inProgressSection.id : existing.section_id;
+      const moved = Boolean(inProgressSection && existing.section_id !== inProgressSection.id);
 
       db.prepare(`
         UPDATE tasks
         SET timer_started_at = ?, section_id = ?, completed = 0, completed_at = NULL, updated_at = ?, updated_by = ?
         WHERE id = ?
-      `).run(now, inProgressSec.id, now, actor, id);
+      `).run(now, targetSectionId, now, actor, id);
 
       db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
         crypto.randomUUID(),
         actor,
-        moved ? `Started timer & moved to "${inProgressSec.name}"` : "Started timer",
+        moved && inProgressSection ? `Started timer & moved to "${inProgressSection.name}"` : "Started timer",
         existing.title,
         now
       );
 
       return NextResponse.json({
-        movedToSection: moved ? inProgressSec.name : null,
+        movedToSection: moved && inProgressSection ? inProgressSection.name : null,
         ...getFullWorkspaceData(),
       });
     }
@@ -350,7 +342,8 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Target section not found in task's project" }, { status: 404 });
       }
 
-      const isTargetDone = isCompletionSectionName(targetSec.name);
+      const { completedSection } = getProjectAutomationSections(db, existing.project_id);
+      const isTargetDone = Boolean(completedSection && completedSection.id === targetSec.id);
       let newCompleted = existing.completed;
       let newCompletedAt = existing.completed_at;
       let newTimerStartedAt: string | null = existing.timer_started_at ?? null;
@@ -434,19 +427,240 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(getFullWorkspaceData());
     }
 
+    if (body.action === "create_section") {
+      const { project_id, name } = body;
+      const trimmed = String(name || "").trim();
+      if (!trimmed) {
+        return NextResponse.json({ error: "Section name cannot be empty." }, { status: 400 });
+      }
+      const proj = db.prepare("SELECT id, name FROM projects WHERE id = ?").get(project_id) as
+        | { id: string; name: string }
+        | undefined;
+      if (!proj) {
+        return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      }
+
+      const maxOrderRow = db
+        .prepare("SELECT COALESCE(MAX(sort_order), 0) as max_order FROM sections WHERE project_id = ?")
+        .get(project_id) as { max_order: number };
+      const id = `sec-${crypto.randomUUID().slice(0, 8)}`;
+
+      db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, ?, ?)").run(
+        id,
+        project_id,
+        trimmed,
+        maxOrderRow.max_order + 1
+      );
+
+      db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+        crypto.randomUUID(),
+        actor,
+        `Added section "${trimmed}"`,
+        proj.name,
+        now
+      );
+
+      return NextResponse.json({ createdSectionId: id, ...getFullWorkspaceData() });
+    }
+
+    if (body.action === "rename_section") {
+      const { section_id, name } = body;
+      const trimmed = String(name || "").trim();
+      if (!trimmed) {
+        return NextResponse.json({ error: "Section name cannot be empty." }, { status: 400 });
+      }
+      const existing = db.prepare("SELECT id, project_id, name FROM sections WHERE id = ?").get(section_id) as
+        | { id: string; project_id: string; name: string }
+        | undefined;
+      if (!existing) {
+        return NextResponse.json({ error: "Section not found" }, { status: 404 });
+      }
+
+      if (trimmed !== existing.name) {
+        db.prepare("UPDATE sections SET name = ? WHERE id = ?").run(trimmed, section_id);
+        db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+          crypto.randomUUID(),
+          actor,
+          `Renamed section "${existing.name}" to "${trimmed}"`,
+          trimmed,
+          now
+        );
+      }
+
+      return NextResponse.json(getFullWorkspaceData());
+    }
+
+    if (body.action === "reorder_section") {
+      const { section_id, direction } = body;
+      if (direction !== "up" && direction !== "down") {
+        return NextResponse.json({ error: "Invalid direction" }, { status: 400 });
+      }
+      const existing = db.prepare("SELECT id, project_id FROM sections WHERE id = ?").get(section_id) as
+        | { id: string; project_id: string }
+        | undefined;
+      if (!existing) {
+        return NextResponse.json({ error: "Section not found" }, { status: 404 });
+      }
+
+      const ordered = db
+        .prepare("SELECT id FROM sections WHERE project_id = ? ORDER BY sort_order ASC, id ASC")
+        .all(existing.project_id) as unknown as { id: string }[];
+
+      const idx = ordered.findIndex((s) => s.id === section_id);
+      const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+      if (idx === -1 || swapIdx < 0 || swapIdx >= ordered.length) {
+        return NextResponse.json(getFullWorkspaceData());
+      }
+
+      const temp = ordered[idx];
+      ordered[idx] = ordered[swapIdx];
+      ordered[swapIdx] = temp;
+
+      const updateOrder = db.prepare("UPDATE sections SET sort_order = ? WHERE id = ?");
+      ordered.forEach((sec, i) => {
+        updateOrder.run(i + 1, sec.id);
+      });
+
+      return NextResponse.json(getFullWorkspaceData());
+    }
+
+    if (body.action === "delete_section") {
+      const { section_id, reassign_to_section_id } = body;
+      const existing = db.prepare("SELECT id, project_id, name FROM sections WHERE id = ?").get(section_id) as
+        | { id: string; project_id: string; name: string }
+        | undefined;
+      if (!existing) {
+        return NextResponse.json({ error: "Section not found" }, { status: 404 });
+      }
+
+      const projectSections = db
+        .prepare("SELECT id FROM sections WHERE project_id = ? ORDER BY sort_order ASC")
+        .all(existing.project_id) as unknown as { id: string }[];
+
+      if (projectSections.length <= 1) {
+        return NextResponse.json(
+          { error: "Cannot delete the last remaining section in a project." },
+          { status: 400 }
+        );
+      }
+
+      const taskCountRow = db
+        .prepare("SELECT COUNT(*) as count FROM tasks WHERE section_id = ?")
+        .get(section_id) as { count: number };
+
+      if (taskCountRow.count > 0) {
+        if (!reassign_to_section_id || reassign_to_section_id === section_id) {
+          return NextResponse.json(
+            { error: "Please choose another section to move existing tasks into before deleting." },
+            { status: 400 }
+          );
+        }
+        const targetSec = db
+          .prepare("SELECT id, project_id FROM sections WHERE id = ?")
+          .get(reassign_to_section_id) as { id: string; project_id: string } | undefined;
+        if (!targetSec || targetSec.project_id !== existing.project_id) {
+          return NextResponse.json({ error: "Target section not found in this project." }, { status: 400 });
+        }
+
+        db.prepare("UPDATE tasks SET section_id = ?, updated_at = ?, updated_by = ? WHERE section_id = ?").run(
+          targetSec.id,
+          now,
+          actor,
+          section_id
+        );
+      }
+
+      // Clear any automation pointers referencing the deleted section
+      db.prepare("UPDATE projects SET in_progress_section_id = NULL WHERE id = ? AND in_progress_section_id = ?").run(
+        existing.project_id,
+        section_id
+      );
+      db.prepare("UPDATE projects SET completed_section_id = NULL WHERE id = ? AND completed_section_id = ?").run(
+        existing.project_id,
+        section_id
+      );
+
+      db.prepare("DELETE FROM sections WHERE id = ?").run(section_id);
+
+      db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+        crypto.randomUUID(),
+        actor,
+        "Deleted section",
+        existing.name,
+        now
+      );
+
+      return NextResponse.json(getFullWorkspaceData());
+    }
+
+    if (body.action === "update_project_automations") {
+      const { project_id, in_progress_section_id = null, completed_section_id = null } = body;
+      const proj = db.prepare("SELECT id, name FROM projects WHERE id = ?").get(project_id) as
+        | { id: string; name: string }
+        | undefined;
+      if (!proj) {
+        return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      }
+
+      const nextInProg = in_progress_section_id || null;
+      const nextComp = completed_section_id || null;
+
+      if (nextInProg && nextComp && nextInProg === nextComp) {
+        return NextResponse.json(
+          { error: "Timer (In Progress) and Completed automations cannot point to the same section." },
+          { status: 400 }
+        );
+      }
+
+      if (nextInProg) {
+        const sec = db
+          .prepare("SELECT id FROM sections WHERE id = ? AND project_id = ?")
+          .get(nextInProg, project_id);
+        if (!sec) {
+          return NextResponse.json({ error: "Selected In Progress section not found in project." }, { status: 400 });
+        }
+      }
+
+      if (nextComp) {
+        const sec = db
+          .prepare("SELECT id FROM sections WHERE id = ? AND project_id = ?")
+          .get(nextComp, project_id);
+        if (!sec) {
+          return NextResponse.json({ error: "Selected Completed section not found in project." }, { status: 400 });
+        }
+      }
+
+      db.prepare("UPDATE projects SET in_progress_section_id = ?, completed_section_id = ? WHERE id = ?").run(
+        nextInProg,
+        nextComp,
+        project_id
+      );
+
+      db.prepare("INSERT INTO activity_log (id, actor, action, task_title, created_at) VALUES (?, ?, ?, ?, ?)").run(
+        crypto.randomUUID(),
+        actor,
+        "Updated automation settings",
+        proj.name,
+        now
+      );
+
+      return NextResponse.json(getFullWorkspaceData());
+    }
+
     if (body.action === "create_project") {
       const { portfolio_id = "port-1", name, description = "" } = body;
       const id = `proj-${crypto.randomUUID().slice(0, 8)}`;
-      db.prepare("INSERT INTO projects (id, portfolio_id, name, description, status, icon) VALUES (?, ?, ?, ?, 'On Track', 'FolderKanban')").run(
-        id,
-        portfolio_id,
-        name,
-        description
-      );
+      const secTodoId = `sec-${id}-1`;
+      const secDoingId = `sec-${id}-2`;
+      const secDoneId = `sec-${id}-3`;
 
-      db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'To Do', 1)").run(`sec-${id}-1`, id);
-      db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'In Progress', 2)").run(`sec-${id}-2`, id);
-      db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'Completed', 3)").run(`sec-${id}-3`, id);
+      db.prepare(
+        "INSERT INTO projects (id, portfolio_id, name, description, status, icon, in_progress_section_id, completed_section_id) VALUES (?, ?, ?, ?, 'On Track', 'FolderKanban', ?, ?)"
+      ).run(id, portfolio_id, name, description, secDoingId, secDoneId);
+
+      db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'To Do', 1)").run(secTodoId, id);
+      db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'In Progress', 2)").run(secDoingId, id);
+      db.prepare("INSERT INTO sections (id, project_id, name, sort_order) VALUES (?, ?, 'Completed', 3)").run(secDoneId, id);
 
       const priorityOptions = JSON.stringify([
         { label: "High", color: "#E06C75" },

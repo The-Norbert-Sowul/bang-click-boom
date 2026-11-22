@@ -12,6 +12,9 @@ import {
   SlidersHorizontal,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
+  Pencil,
+  Settings,
   Trash2,
   Save,
   Clock,
@@ -54,6 +57,8 @@ interface Project {
   status: string;
   icon: string;
   is_archived: number;
+  in_progress_section_id: string | null;
+  completed_section_id: string | null;
 }
 
 interface Section {
@@ -113,7 +118,17 @@ export default function BangClickBoomApp() {
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showCustomizeModal, setShowCustomizeModal] = useState(false);
+  const [showAutomationModal, setShowAutomationModal] = useState(false);
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
+
+  // Section management state
+  const [isAddingSection, setIsAddingSection] = useState(false);
+  const [newSectionName, setNewSectionName] = useState("");
+  const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
+  const [editingSectionName, setEditingSectionName] = useState("");
+  const [sectionToDelete, setSectionToDelete] = useState<Section | null>(null);
+  const [reassignTargetSectionId, setReassignTargetSectionId] = useState<string>("");
+  const [automationError, setAutomationError] = useState<string | null>(null);
 
   // Live timer clock & Drag-and-drop state
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -173,11 +188,15 @@ export default function BangClickBoomApp() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (res.ok) {
-      const json = await res.json();
+    const json = await res.json().catch(() => null);
+    if (res.ok && json) {
       setData(json);
       return json;
     }
+    if (json?.error) {
+      triggerToast(`Error: ${json.error}`);
+    }
+    return null;
   }
 
   function triggerToast(msg: string) {
@@ -200,6 +219,9 @@ export default function BangClickBoomApp() {
   const projectSections = activeProject
     ? data.sections.filter((s) => s.project_id === activeProject.id)
     : [];
+  const activeInProgressSection = activeProject?.in_progress_section_id
+    ? projectSections.find((s) => s.id === activeProject.in_progress_section_id) || null
+    : null;
   const projectFields = activeProject
     ? data.customFields.filter((f) => f.project_id === activeProject.id)
     : [];
@@ -270,6 +292,104 @@ export default function BangClickBoomApp() {
       section_id: targetSection.id,
     });
     triggerToast(`Moved "${task.title}" to ${targetSection.name}`);
+  }
+
+  async function handleCreateSection() {
+    const trimmed = newSectionName.trim();
+    if (!activeProject || !trimmed) {
+      setIsAddingSection(false);
+      setNewSectionName("");
+      return;
+    }
+    setNewSectionName("");
+    setIsAddingSection(false);
+    const res = await apiAction({
+      action: "create_section",
+      project_id: activeProject.id,
+      name: trimmed,
+    });
+    if (res) {
+      triggerToast(`Added section "${trimmed}"`);
+    }
+  }
+
+  async function handleRenameSection(section: Section) {
+    const trimmed = editingSectionName.trim();
+    setEditingSectionId(null);
+    setEditingSectionName("");
+    if (!trimmed || trimmed === section.name) return;
+    const res = await apiAction({
+      action: "rename_section",
+      section_id: section.id,
+      name: trimmed,
+    });
+    if (res) {
+      triggerToast(`Renamed section to "${trimmed}"`);
+    }
+  }
+
+  async function handleReorderSection(section: Section, direction: "up" | "down") {
+    await apiAction({
+      action: "reorder_section",
+      section_id: section.id,
+      direction,
+    });
+  }
+
+  function handleRequestDeleteSection(section: Section) {
+    if (!activeProject || projectSections.length <= 1) return;
+    const tasksInSection = data!.tasks.filter((t) => t.section_id === section.id);
+    const isMapped =
+      activeProject.in_progress_section_id === section.id ||
+      activeProject.completed_section_id === section.id;
+
+    if (tasksInSection.length === 0 && !isMapped) {
+      apiAction({ action: "delete_section", section_id: section.id }).then((res) => {
+        if (res) triggerToast(`Deleted section "${section.name}"`);
+      });
+      return;
+    }
+
+    const fallbackTarget = projectSections.find((s) => s.id !== section.id);
+    setReassignTargetSectionId(fallbackTarget?.id || "");
+    setSectionToDelete(section);
+  }
+
+  async function handleConfirmDeleteSection(e: React.FormEvent) {
+    e.preventDefault();
+    if (!sectionToDelete) return;
+    const deletedName = sectionToDelete.name;
+    const targetId = reassignTargetSectionId;
+    setSectionToDelete(null);
+    const res = await apiAction({
+      action: "delete_section",
+      section_id: sectionToDelete.id,
+      reassign_to_section_id: targetId || undefined,
+    });
+    if (res) {
+      triggerToast(`Deleted section "${deletedName}"`);
+    }
+  }
+
+  async function handleUpdateAutomations(
+    nextInProgressId: string | null,
+    nextCompletedId: string | null
+  ) {
+    if (!activeProject) return;
+    if (nextInProgressId && nextCompletedId && nextInProgressId === nextCompletedId) {
+      setAutomationError("Timer (In Progress) and Completed automations cannot use the same section.");
+      return;
+    }
+    setAutomationError(null);
+    const res = await apiAction({
+      action: "update_project_automations",
+      project_id: activeProject.id,
+      in_progress_section_id: nextInProgressId,
+      completed_section_id: nextCompletedId,
+    });
+    if (res) {
+      triggerToast("Updated Automation Settings");
+    }
   }
 
   async function handleAddCustomField(e: React.FormEvent) {
@@ -951,6 +1071,16 @@ export default function BangClickBoomApp() {
 
               <div className="flex items-center gap-3">
                 <button
+                  onClick={() => {
+                    setAutomationError(null);
+                    setShowAutomationModal(true);
+                  }}
+                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold bg-bcb-surface hover:bg-bcb-border text-bcb-tea border border-bcb-border transition"
+                >
+                  <Settings className="w-4 h-4 text-bcb-cerulean-light" />
+                  Automation Settings
+                </button>
+                <button
                   onClick={() => setShowCustomizeModal(true)}
                   className="flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold bg-bcb-surface hover:bg-bcb-border text-bcb-tea border border-bcb-border transition"
                 >
@@ -996,11 +1126,14 @@ export default function BangClickBoomApp() {
                       }
                     }}
                   >
-                    {projectSections.map((section) => {
+                    {projectSections.map((section, sectionIndex) => {
                       const sectionTasks = data.tasks.filter(
                         (t) => t.project_id === activeProject.id && t.section_id === section.id
                       );
                       const isCollapsed = !!collapsedSections[section.id];
+                      const isInProgressTarget = activeProject.in_progress_section_id === section.id;
+                      const isCompletedTarget = activeProject.completed_section_id === section.id;
+                      const isEditingThisSection = editingSectionId === section.id;
                       const draggedTask = draggedTaskId
                         ? data.tasks.find((t) => t.id === draggedTaskId)
                         : null;
@@ -1036,7 +1169,7 @@ export default function BangClickBoomApp() {
                           <tr
                             onDragOver={handleSectionDragOver}
                             onDrop={handleSectionDrop}
-                            className={`transition ${
+                            className={`group/sec transition ${
                               isDropTarget
                                 ? "bg-bcb-cerulean/25 ring-1 ring-inset ring-bcb-cerulean"
                                 : "bg-bcb-canvas/70"
@@ -1046,31 +1179,124 @@ export default function BangClickBoomApp() {
                               colSpan={4 + visibleProjectFields.length}
                               className="py-2.5 px-4 font-bold text-xs uppercase tracking-wider text-bcb-tea"
                             >
-                              <div className="flex items-center justify-between">
-                                <button
-                                  onClick={() =>
-                                    setCollapsedSections({
-                                      ...collapsedSections,
-                                      [section.id]: !isCollapsed,
-                                    })
-                                  }
-                                  className="flex items-center gap-2 hover:text-white transition"
-                                >
-                                  {isCollapsed ? (
-                                    <ChevronRight className="w-4 h-4" />
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setCollapsedSections({
+                                        ...collapsedSections,
+                                        [section.id]: !isCollapsed,
+                                      })
+                                    }
+                                    className="p-0.5 rounded hover:bg-bcb-surface hover:text-white transition shrink-0"
+                                    title={isCollapsed ? "Expand section" : "Collapse section"}
+                                  >
+                                    {isCollapsed ? (
+                                      <ChevronRight className="w-4 h-4" />
+                                    ) : (
+                                      <ChevronDown className="w-4 h-4" />
+                                    )}
+                                  </button>
+
+                                  {isEditingThisSection ? (
+                                    <input
+                                      type="text"
+                                      autoFocus
+                                      value={editingSectionName}
+                                      onChange={(e) => setEditingSectionName(e.target.value)}
+                                      onBlur={() => handleRenameSection(section)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") {
+                                          e.preventDefault();
+                                          handleRenameSection(section);
+                                        } else if (e.key === "Escape") {
+                                          setEditingSectionId(null);
+                                          setEditingSectionName("");
+                                        }
+                                      }}
+                                      className="bg-bcb-coffee border border-bcb-cerulean rounded px-2 py-0.5 text-xs font-bold uppercase tracking-wider text-white focus:outline-none w-56"
+                                    />
                                   ) : (
-                                    <ChevronDown className="w-4 h-4" />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingSectionId(section.id);
+                                        setEditingSectionName(section.name);
+                                      }}
+                                      title="Click to rename section"
+                                      className="flex items-center gap-1.5 hover:text-white transition truncate text-left"
+                                    >
+                                      <span className="truncate">{section.name}</span>
+                                      <Pencil className="w-3 h-3 opacity-0 group-hover/sec:opacity-70 shrink-0" />
+                                    </button>
                                   )}
-                                  <span>{section.name}</span>
-                                  <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-bcb-surface text-stone-300">
+
+                                  <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-bcb-surface text-stone-300 shrink-0">
                                     {sectionTasks.length}
                                   </span>
-                                </button>
-                                {isDropTarget && (
-                                  <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded bg-bcb-cerulean text-white">
-                                    Drop to move here
-                                  </span>
-                                )}
+
+                                  {isInProgressTarget && (
+                                    <span
+                                      title="Tasks move here automatically when their timer starts"
+                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold normal-case tracking-normal bg-bcb-cerulean/25 text-bcb-cerulean-light border border-bcb-cerulean/40 shrink-0"
+                                    >
+                                      <Play className="w-2.5 h-2.5 fill-current" />
+                                      Timer Target
+                                    </span>
+                                  )}
+                                  {isCompletedTarget && (
+                                    <span
+                                      title="Tasks move here automatically when marked complete"
+                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold normal-case tracking-normal bg-bcb-tea/15 text-bcb-tea border border-bcb-tea/35 shrink-0"
+                                    >
+                                      <CheckCircle2 className="w-2.5 h-2.5" />
+                                      Completed Target
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {isDropTarget ? (
+                                    <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded bg-bcb-cerulean text-white">
+                                      Drop to move here
+                                    </span>
+                                  ) : (
+                                    <div className="flex items-center gap-0.5 opacity-0 group-hover/sec:opacity-100 transition">
+                                      <button
+                                        type="button"
+                                        disabled={sectionIndex === 0}
+                                        onClick={() => handleReorderSection(section, "up")}
+                                        title="Move section up"
+                                        className="p-1 rounded hover:bg-bcb-surface text-stone-400 hover:text-white disabled:opacity-25 disabled:pointer-events-none transition"
+                                      >
+                                        <ChevronUp className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={sectionIndex === projectSections.length - 1}
+                                        onClick={() => handleReorderSection(section, "down")}
+                                        title="Move section down"
+                                        className="p-1 rounded hover:bg-bcb-surface text-stone-400 hover:text-white disabled:opacity-25 disabled:pointer-events-none transition"
+                                      >
+                                        <ChevronDown className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={projectSections.length <= 1}
+                                        onClick={() => handleRequestDeleteSection(section)}
+                                        title={
+                                          projectSections.length <= 1
+                                            ? "Cannot delete the last remaining section"
+                                            : "Delete section"
+                                        }
+                                        className="p-1 rounded hover:bg-red-950/60 text-stone-400 hover:text-red-400 disabled:opacity-25 disabled:pointer-events-none transition"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
                               </div>
                             </td>
                           </tr>
@@ -1280,7 +1506,11 @@ export default function BangClickBoomApp() {
                                                   e.stopPropagation();
                                                   handleStartTimer(task);
                                                 }}
-                                                title="Start timer (moves to In Progress)"
+                                                title={
+                                                  activeInProgressSection
+                                                    ? `Start timer (moves to "${activeInProgressSection.name}")`
+                                                    : "Start timer"
+                                                }
                                                 className="p-1.5 rounded-md bg-bcb-canvas border border-bcb-border text-bcb-cerulean-light hover:bg-bcb-cerulean hover:text-white hover:border-bcb-cerulean transition"
                                               >
                                                 <Play className="w-3 h-3 fill-current" />
@@ -1397,6 +1627,59 @@ export default function BangClickBoomApp() {
                         </React.Fragment>
                       );
                     })}
+
+                    {/* Bottom "+ Add Section" Cerulean Bar */}
+                    <tr className="bg-bcb-cerulean hover:bg-bcb-cerulean-light transition">
+                      <td
+                        colSpan={4 + visibleProjectFields.length}
+                        className="py-2.5 px-4 font-bold text-xs uppercase tracking-wider text-white"
+                      >
+                        {isAddingSection ? (
+                          <div className="flex items-center gap-2">
+                            <Plus className="w-4 h-4 shrink-0 text-white" />
+                            <input
+                              type="text"
+                              autoFocus
+                              value={newSectionName}
+                              onChange={(e) => setNewSectionName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  handleCreateSection();
+                                } else if (e.key === "Escape") {
+                                  setIsAddingSection(false);
+                                  setNewSectionName("");
+                                }
+                              }}
+                              onBlur={() => {
+                                if (newSectionName.trim()) {
+                                  handleCreateSection();
+                                } else {
+                                  setIsAddingSection(false);
+                                }
+                              }}
+                              placeholder="Enter new section name and press Enter..."
+                              className="flex-1 bg-black/20 border border-white/40 rounded px-2.5 py-0.5 text-xs font-semibold normal-case tracking-normal text-white placeholder:text-white/75 focus:outline-none focus:border-white"
+                            />
+                            <span className="text-[10px] font-medium normal-case tracking-normal text-white/80 shrink-0">
+                              Enter to add · Esc to cancel
+                            </span>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNewSectionName("");
+                              setIsAddingSection(true);
+                            }}
+                            className="w-full flex items-center gap-2 text-left text-white cursor-pointer"
+                          >
+                            <Plus className="w-4 h-4 shrink-0" />
+                            <span>Add Section</span>
+                          </button>
+                        )}
+                      </td>
+                    </tr>
                   </tbody>
                 </table>
               </div>
@@ -1406,22 +1689,227 @@ export default function BangClickBoomApp() {
       </main>
 
       {/* Slide-Over Task Detail Drawer */}
-      {selectedTask && (
-        <TaskDetailDrawer
-          task={selectedTask}
-          projectFields={data.customFields.filter((f) => f.project_id === selectedTask.project_id)}
-          nowMs={nowMs}
-          onClose={() => setSelectedTaskId(null)}
-          onUpdateTask={apiAction}
-          onDeleteTask={(taskId) => apiAction({ action: "delete_task", id: taskId })}
-          onStartTimer={handleStartTimer}
-          onStopTimer={handleStopTimer}
-          onOpenCustomize={() => {
-            setActiveView(selectedTask.project_id);
-            setShowCustomizeModal(true);
-          }}
-        />
+      {selectedTask && (() => {
+        const taskProj = data.projects.find((p) => p.id === selectedTask.project_id);
+        const taskSections = data.sections.filter((s) => s.project_id === selectedTask.project_id);
+        const taskInProgSec = taskProj?.in_progress_section_id
+          ? taskSections.find((s) => s.id === taskProj.in_progress_section_id) || null
+          : null;
+        return (
+          <TaskDetailDrawer
+            task={selectedTask}
+            projectFields={data.customFields.filter((f) => f.project_id === selectedTask.project_id)}
+            projectSections={taskSections}
+            inProgressSectionName={taskInProgSec?.name ?? null}
+            nowMs={nowMs}
+            onClose={() => setSelectedTaskId(null)}
+            onUpdateTask={apiAction}
+            onMoveSection={handleMoveTaskToSection}
+            onDeleteTask={(taskId) => apiAction({ action: "delete_task", id: taskId })}
+            onStartTimer={handleStartTimer}
+            onStopTimer={handleStopTimer}
+            onOpenCustomize={() => {
+              setActiveView(selectedTask.project_id);
+              setShowCustomizeModal(true);
+            }}
+          />
+        );
+      })()}
+
+      {/* Modal: Automation Settings */}
+      {showAutomationModal && activeProject && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div className="bg-bcb-coffee border border-bcb-border rounded-xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-bcb-border pb-4">
+              <div>
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Settings className="w-5 h-5 text-bcb-cerulean-light" />
+                  Automation Settings — {activeProject.name}
+                </h3>
+                <p className="text-xs text-stone-400 mt-0.5">
+                  Configure how tasks automatically move between sections in this project.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAutomationModal(false)}
+                className="p-1 rounded hover:bg-bcb-surface text-stone-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {automationError && (
+              <div className="px-3 py-2 rounded-lg bg-red-950/60 border border-red-500/40 text-xs text-red-300">
+                {automationError}
+              </div>
+            )}
+
+            <div className="space-y-4">
+              {/* Rule 1: Timer Started */}
+              <div className="p-4 rounded-lg bg-bcb-canvas border border-bcb-border space-y-2.5">
+                <div className="flex items-center gap-2">
+                  <Play className="w-4 h-4 text-bcb-cerulean-light fill-current" />
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-white">
+                    When Task Timer Starts
+                  </h4>
+                </div>
+                <p className="text-xs text-stone-400">
+                  Automatically move the task to this section when its live timer is started.
+                </p>
+                <select
+                  value={activeProject.in_progress_section_id || ""}
+                  onChange={(e) =>
+                    handleUpdateAutomations(
+                      e.target.value || null,
+                      activeProject.completed_section_id || null
+                    )
+                  }
+                  className="w-full bg-bcb-coffee border border-bcb-border rounded-lg px-3 py-2 text-xs text-white focus:border-bcb-cerulean focus:outline-none"
+                >
+                  <option value="">None (don&apos;t auto-move)</option>
+                  {projectSections.map((sec) => {
+                    const isUsedByCompleted = activeProject.completed_section_id === sec.id;
+                    return (
+                      <option key={sec.id} value={sec.id} disabled={isUsedByCompleted}>
+                        {sec.name}
+                        {isUsedByCompleted ? " (used by Completed)" : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              {/* Rule 2: Task Completed */}
+              <div className="p-4 rounded-lg bg-bcb-canvas border border-bcb-border space-y-2.5">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-bcb-tea" />
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-white">
+                    When Task Is Marked Complete
+                  </h4>
+                </div>
+                <p className="text-xs text-stone-400">
+                  Automatically move completed tasks to this section. Dragging a task into this section also marks it
+                  complete and stops any running timer.
+                </p>
+                <select
+                  value={activeProject.completed_section_id || ""}
+                  onChange={(e) =>
+                    handleUpdateAutomations(
+                      activeProject.in_progress_section_id || null,
+                      e.target.value || null
+                    )
+                  }
+                  className="w-full bg-bcb-coffee border border-bcb-border rounded-lg px-3 py-2 text-xs text-white focus:border-bcb-cerulean focus:outline-none"
+                >
+                  <option value="">None (don&apos;t auto-move)</option>
+                  {projectSections.map((sec) => {
+                    const isUsedByTimer = activeProject.in_progress_section_id === sec.id;
+                    return (
+                      <option key={sec.id} value={sec.id} disabled={isUsedByTimer}>
+                        {sec.name}
+                        {isUsedByTimer ? " (used by Timer)" : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-bcb-border">
+              <button
+                type="button"
+                onClick={() => setShowAutomationModal(false)}
+                className="px-4 py-2 rounded-lg bg-bcb-cerulean hover:bg-bcb-cerulean-light text-white text-xs font-semibold transition"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
       )}
+
+      {/* Modal: Safe Delete Section */}
+      {sectionToDelete && activeProject && (() => {
+        const tasksInSection = data.tasks.filter((t) => t.section_id === sectionToDelete.id);
+        const otherSections = projectSections.filter((s) => s.id !== sectionToDelete.id);
+        const clearsTimer = activeProject.in_progress_section_id === sectionToDelete.id;
+        const clearsCompleted = activeProject.completed_section_id === sectionToDelete.id;
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
+            <form
+              onSubmit={handleConfirmDeleteSection}
+              className="bg-bcb-coffee border border-bcb-border rounded-xl max-w-md w-full p-6 space-y-4 shadow-2xl"
+            >
+              <div className="flex items-center justify-between border-b border-bcb-border pb-3">
+                <h3 className="text-lg font-bold text-red-400 flex items-center gap-2">
+                  <Trash2 className="w-5 h-5" />
+                  Delete Section
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setSectionToDelete(null)}
+                  className="text-stone-400 hover:text-white"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <p className="text-xs text-stone-300 leading-relaxed">
+                Are you sure you want to delete <strong className="text-white">{sectionToDelete.name}</strong>?
+              </p>
+
+              {tasksInSection.length > 0 && (
+                <div className="space-y-1.5">
+                  <label className="text-xs text-stone-300 font-medium block">
+                    Move its <strong className="text-bcb-tea">{tasksInSection.length}</strong>{" "}
+                    {tasksInSection.length === 1 ? "task" : "tasks"} to:
+                  </label>
+                  <select
+                    required
+                    value={reassignTargetSectionId}
+                    onChange={(e) => setReassignTargetSectionId(e.target.value)}
+                    className="w-full bg-bcb-canvas border border-bcb-border rounded-lg px-3 py-2 text-xs text-white focus:border-bcb-cerulean focus:outline-none"
+                  >
+                    {otherSections.map((sec) => (
+                      <option key={sec.id} value={sec.id}>
+                        {sec.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {(clearsTimer || clearsCompleted) && (
+                <div className="px-3 py-2 rounded-lg bg-amber-950/40 border border-amber-500/40 text-xs text-amber-200">
+                  Deleting this section will reset the{" "}
+                  <strong>
+                    {clearsTimer ? "Timer Started" : "Task Completed"}
+                  </strong>{" "}
+                  automation to <em>None</em>.
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setSectionToDelete(null)}
+                  className="px-4 py-2 rounded-lg bg-bcb-surface hover:bg-bcb-border text-xs font-semibold text-stone-200 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold transition"
+                >
+                  {tasksInSection.length > 0 ? "Move Tasks & Delete" : "Delete Section"}
+                </button>
+              </div>
+            </form>
+          </div>
+        );
+      })()}
 
       {/* Modal: Customize Task Fields */}
       {showCustomizeModal && activeProject && (
